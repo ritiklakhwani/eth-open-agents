@@ -22,6 +22,9 @@ importers:
       fastify:
         specifier: ^5.8.5
         version: 5.8.5
+      shared-types:
+        specifier: workspace:*
+        version: link:../../packages/shared-types
       socket.io:
         specifier: ^4.8.3
         version: 4.8.3

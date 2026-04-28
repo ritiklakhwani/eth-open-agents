@@ -15,6 +15,7 @@
     "better-sqlite3": "^12.9.0",
     "dotenv": "^17.4.2",
     "fastify": "^5.8.5",
+    "shared-types": "workspace:*",
     "socket.io": "^4.8.3",
     "viem": "^2.48.4"
   },

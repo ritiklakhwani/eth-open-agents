@@ -64,6 +64,10 @@ export class Memory {
     `).run(peerId, zone, this.petId)
   }
 
+  updateBlobCID(cid: string) {
+    this.db.prepare('UPDATE pets SET blob_cid = ? WHERE token_id = ?').run(cid, this.petId)
+  }
+
   // Called every 30 min — deterministic stat tick, no LLM
   tickStats() {
     this.db.prepare(`

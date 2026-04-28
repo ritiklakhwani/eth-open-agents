@@ -31,6 +31,7 @@ app.get<{ Params: { id: string } }>('/api/pets/:id', (req, reply) => {
 app.get<{ Params: { petId: string } }>('/api/sse/:petId', (req, reply) => {
   const { petId } = req.params
 
+  reply.hijack()
   reply.raw.setHeader('Content-Type',  'text/event-stream')
   reply.raw.setHeader('Cache-Control', 'no-cache')
   reply.raw.setHeader('Connection',    'keep-alive')
@@ -70,7 +71,7 @@ async function main() {
   const positions = new Map<number, { x: number; y: number; zone: Zone }>()
 
   io.on('connection', (socket) => {
-    let playerId: number
+    let playerId: number | undefined
 
     socket.on('join', ({ petId }: { petId: number }) => {
       playerId = petId
@@ -87,8 +88,8 @@ async function main() {
     })
 
     socket.on('disconnect', () => {
-      positions.delete(playerId)
       if (playerId != null) {
+        positions.delete(playerId)
         io.to('world').emit('petLeft', { petId: playerId })
         console.log(`[Socket] Pet ${playerId} disconnected`)
       }
@@ -102,18 +103,34 @@ async function main() {
     }
   }, 100)
 
-  // Proximity chat: when two pets are within 80px, trigger AXL chat (Phase 6)
+  // Proximity chat: when two pets are within 80px, trigger one AXL chat exchange.
+  // Cooldown prevents spamming — one exchange per pair per minute.
+  const lastProximityChat = new Map<string, number>()
+  const PROXIMITY_COOLDOWN_MS = 60_000
+
   setInterval(() => {
     const pets = Array.from(positions.entries())
+    const now  = Date.now()
     for (let i = 0; i < pets.length; i++) {
       for (let j = i + 1; j < pets.length; j++) {
         const [a, posA] = pets[i]
         const [b, posB] = pets[j]
         const dist = Math.hypot(posA.x - posB.x, posA.y - posB.y)
-        if (dist < 80) {
-          // Workers handle the actual AXL chat in Phase 6
-          petEvents.emit('proximity', { a, b })
-        }
+        if (dist >= 80) continue
+
+        const pairKey = `${Math.min(a, b)}-${Math.max(a, b)}`
+        if ((lastProximityChat.get(pairKey) ?? 0) + PROXIMITY_COOLDOWN_MS > now) continue
+        lastProximityChat.set(pairKey, now)
+
+        // Look up peer IDs so workers can address each other over AXL
+        const petA = db.prepare('SELECT peer_id, name FROM pets WHERE token_id = ?')
+          .get(a) as { peer_id: string | null; name: string } | undefined
+        const petB = db.prepare('SELECT peer_id, name FROM pets WHERE token_id = ?')
+          .get(b) as { peer_id: string | null; name: string } | undefined
+        if (!petA?.peer_id || !petB?.peer_id) continue
+
+        supervisor.broadcast(a, { type: 'chat-request', withPetId: b, withPeerId: petB.peer_id, withName: petB.name })
+        supervisor.broadcast(b, { type: 'chat-request', withPetId: a, withPeerId: petA.peer_id, withName: petA.name })
       }
     }
   }, 2_000)

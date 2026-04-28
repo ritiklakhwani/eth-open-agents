@@ -34,7 +34,9 @@ Rules: stay in character, max 2 sentences, be engaging and natural.`
       messages: [{ role: 'user', content: incoming.text }],
     })
 
-    return (msg.content[0] as Anthropic.TextBlock).text
+    const block = msg.content[0]
+    if (!block || block.type !== 'text') throw new Error('Unexpected response from Claude')
+    return block.text
   }
 
   // Sonnet — used for big decisions (subscription scan, battle strategy)
@@ -46,17 +48,25 @@ Rules: stay in character, max 2 sentences, be engaging and natural.`
     }
 
     sonnetCallsToday++
-    const msg = await client.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 512,
-      system: `${this.opts.personality}\nYou are making an important decision as a ${this.opts.archetype} pet.`,
-      messages: [{
-        role: 'user',
-        content: `Task: ${task}\nContext: ${JSON.stringify(context)}\nRespond with a clear decision and brief reasoning.`,
-      }],
-    })
+    let msg: Awaited<ReturnType<typeof client.messages.create>>
+    try {
+      msg = await client.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 512,
+        system: `${this.opts.personality}\nYou are making an important decision as a ${this.opts.archetype} pet.`,
+        messages: [{
+          role: 'user',
+          content: `Task: ${task}\nContext: ${JSON.stringify(context)}\nRespond with a clear decision and brief reasoning.`,
+        }],
+      })
+    } catch (err) {
+      sonnetCallsToday-- // don't charge quota for API failures
+      throw err
+    }
 
-    return (msg.content[0] as Anthropic.TextBlock).text
+    const block = msg.content[0]
+    if (!block || block.type !== 'text') throw new Error('Unexpected response from Claude')
+    return block.text
   }
 
   // Fallback for when Sonnet is capped
@@ -70,7 +80,9 @@ Rules: stay in character, max 2 sentences, be engaging and natural.`
         content: `Task: ${task}\nContext: ${JSON.stringify(context)}`,
       }],
     })
-    return (msg.content[0] as Anthropic.TextBlock).text
+    const block = msg.content[0]
+    if (!block || block.type !== 'text') throw new Error('Unexpected response from Claude')
+    return block.text
   }
 
   // Generate a conversation opener for when two pets meet

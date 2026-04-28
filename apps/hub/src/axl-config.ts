@@ -27,7 +27,7 @@ export function generatePetAxlConfig(petId: number): PetAxlConfig {
 
   const keyPath = path.join(keyDir, `pet-${petId}.pem`)
   if (!existsSync(keyPath)) {
-    execSync(`openssl genpkey -algorithm ed25519 -out ${keyPath}`)
+    execSync(`openssl genpkey -algorithm ed25519 -out "${keyPath}"`)
   }
 
   // api_port: 9001, 9101, 9201 ... (HTTP API — what we curl /send /recv /topology)

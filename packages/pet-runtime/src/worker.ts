@@ -7,7 +7,7 @@ import { Memory } from './memory'
 import { loadBlob, saveBlob } from './blob'
 
 const PET_ID   = Number(process.env.PET_ID ?? '0')
-const BLOB_CID = process.env.BLOB_CID ?? ''
+let   BLOB_CID = process.env.BLOB_CID ?? ''   // mutable — updated when 0G assigns a new root hash
 const ENS_NAME = process.env.ENS_NAME ?? `pet${PET_ID}`
 
 // api_port formula must match axl-config.ts: 9001 + petId * 100
@@ -127,7 +127,9 @@ async function main() {
         updatedAt: Date.now(),
       })
       if (newCID !== BLOB_CID) {
-        console.log(`[Pet ${PET_ID}] Blob updated — new CID: ${newCID}`)
+        BLOB_CID = newCID
+        memory.updateBlobCID(newCID)
+        console.log(`[Pet ${PET_ID}] Blob CID updated: ${newCID}`)
       }
     } catch (err) {
       console.error(`[Pet ${PET_ID}] blob sync error:`, (err as Error).message)

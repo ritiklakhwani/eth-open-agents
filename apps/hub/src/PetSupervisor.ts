@@ -3,6 +3,7 @@ import path from 'path'
 import { createPublicClient, http, parseAbi } from 'viem'
 import { sepolia } from 'viem/chains'
 import type { DB } from './db'
+import { generatePetAxlConfig } from './axl-config'
 
 // Inline ABI until contracts-sdk is filled by Ritik (Phase 2)
 const TAMA_PET_ABI = parseAbi([
@@ -53,6 +54,9 @@ export class PetSupervisor {
       console.warn(`[Supervisor] Pet ${tokenId} already running`)
       return
     }
+
+    // Generate AXL config + ed25519 key before the worker tries to read it (idempotent)
+    generatePetAxlConfig(tokenId)
 
     this.db.prepare(`
       INSERT OR IGNORE INTO pets (token_id, name, owner_address, blob_cid, ens_name, created_at)

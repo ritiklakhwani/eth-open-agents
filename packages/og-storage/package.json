@@ -1,0 +1,8 @@
+{
+  "name": "og-storage",
+  "version": "0.1.0",
+  "private": true,
+  "description": "0G Storage SDK wrapper — upload/fetch encrypted pet identity blobs (Karmanay / Phase 7a)",
+  "main": "index.ts",
+  "license": "MIT"
+}

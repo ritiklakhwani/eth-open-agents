@@ -1,0 +1,8 @@
+{
+  "name": "ens",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ENS NameWrapper helpers — mint pet subnames, read text records (Ritik / Phase 3)",
+  "main": "index.ts",
+  "license": "MIT"
+}

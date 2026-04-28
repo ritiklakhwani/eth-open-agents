@@ -1,0 +1,8 @@
+{
+  "name": "sprite-gen",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Replicate API client for photo to pixel-art sprite (Ritik / Phase 7b)",
+  "main": "index.ts",
+  "license": "MIT"
+}

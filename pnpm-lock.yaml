@@ -103,6 +103,14 @@ importers:
         specifier: ^5
         version: 5.9.3
 
+  packages/contracts-sdk: {}
+
+  packages/ens: {}
+
+  packages/keeperhub: {}
+
+  packages/og-storage: {}
+
   packages/pet-runtime:
     dependencies:
       '@anthropic-ai/sdk':
@@ -132,6 +140,8 @@ importers:
         version: 6.0.3
 
   packages/shared-types: {}
+
+  packages/sprite-gen: {}
 
 packages:
 

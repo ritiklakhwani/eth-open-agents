@@ -2,7 +2,11 @@
   "name": "ens",
   "version": "0.1.0",
   "private": true,
-  "description": "ENS NameWrapper helpers — mint pet subnames, read text records (Ritik / Phase 3)",
+  "description": "ENS NameWrapper helpers — mint pet subnames, read text records",
+  "type": "module",
   "main": "index.ts",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "viem": "^2.48.4"
+  }
 }

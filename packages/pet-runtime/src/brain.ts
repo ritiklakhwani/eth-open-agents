@@ -23,7 +23,7 @@ export class Brain {
 
     const system = `${this.opts.personality}
 Archetype: ${this.opts.archetype}
-Friendship level with this pet: ${friendship}/10
+Friendship level with this pet: ${Math.min(friendship, 10)}/10
 Recent chat history: ${JSON.stringify(recent.slice(0, 5))}
 Rules: stay in character, max 2 sentences, be engaging and natural.`
 

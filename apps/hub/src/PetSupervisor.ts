@@ -90,7 +90,7 @@ export class PetSupervisor {
         ENS_NAME:  name,
         OWNER:     owner,
         WALLET:    wallet,
-        ARCHETYPE: String(archetype),
+        PET_ARCHETYPE: String(archetype),
         TRAITS:    String(traits),
       },
       execArgv: ['--import', 'tsx'],

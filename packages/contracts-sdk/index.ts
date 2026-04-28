@@ -3,17 +3,18 @@
 //
 // Karmanay's Hub imports from here to watch Mint events, query pet data, etc.
 
+import type { Abi } from 'viem'
 import TamaPetAbi from './abis/TamaPet.json'
 import PetWalletFactoryAbi from './abis/PetWalletFactory.json'
 import PetWalletAbi from './abis/PetWallet.json'
 import BattleEscrowAbi from './abis/BattleEscrow.json'
 import SubscriptionRegistryAbi from './abis/SubscriptionRegistry.json'
 
-export const TamaPetABI = TamaPetAbi
-export const PetWalletFactoryABI = PetWalletFactoryAbi
-export const PetWalletABI = PetWalletAbi
-export const BattleEscrowABI = BattleEscrowAbi
-export const SubscriptionRegistryABI = SubscriptionRegistryAbi
+export const TamaPetABI             = TamaPetAbi             as Abi
+export const PetWalletFactoryABI    = PetWalletFactoryAbi    as Abi
+export const PetWalletABI           = PetWalletAbi           as Abi
+export const BattleEscrowABI        = BattleEscrowAbi        as Abi
+export const SubscriptionRegistryABI = SubscriptionRegistryAbi as Abi
 
 /// Deployed contract addresses (Sepolia, chain id 11155111)
 export const ADDRESSES_SEPOLIA = {

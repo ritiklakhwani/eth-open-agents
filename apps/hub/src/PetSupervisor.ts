@@ -1,20 +1,30 @@
 import { fork, type ChildProcess } from 'child_process'
 import path from 'path'
-import { createPublicClient, http, parseAbi } from 'viem'
+import { createPublicClient, http } from 'viem'
 import { sepolia } from 'viem/chains'
+import { TamaPetABI, ADDRESSES_SEPOLIA } from 'contracts-sdk'
 import type { DB } from './db'
 import { generatePetAxlConfig } from './axl-config'
 
-// Inline ABI until contracts-sdk is filled by Ritik (Phase 2)
-const TAMA_PET_ABI = parseAbi([
-  'event Mint(uint256 indexed tokenId, address indexed owner, string blobCID, string name)',
-])
+// Shape of the Mint event args as emitted by TamaPet.sol
+interface MintEventArgs {
+  tokenId:   bigint
+  owner:     `0x${string}`
+  name:      string
+  blobCID:   string
+  archetype: number
+  traits:    bigint
+  wallet:    `0x${string}`
+}
 
 interface MintArgs {
-  tokenId: number
-  owner: `0x${string}`
-  blobCID: string
-  name: string
+  tokenId:   number
+  owner:     `0x${string}`
+  name:      string
+  blobCID:   string
+  archetype: number
+  traits:    bigint
+  wallet:    `0x${string}`
 }
 
 export class PetSupervisor {
@@ -27,29 +37,34 @@ export class PetSupervisor {
   constructor(private db: DB) {}
 
   async start() {
-    const contractAddress = process.env.TAMA_PET_ADDRESS as `0x${string}` | undefined
-    if (!contractAddress) {
-      console.warn('[Supervisor] TAMA_PET_ADDRESS not set — skipping Mint event watcher')
-      return
-    }
-
-    console.log(`[Supervisor] Watching ${contractAddress} for Mint events`)
+    console.log(`[Supervisor] Watching ${ADDRESSES_SEPOLIA.TamaPet} for Mint events`)
     this.client.watchContractEvent({
-      address: contractAddress,
-      abi: TAMA_PET_ABI,
+      address: ADDRESSES_SEPOLIA.TamaPet,
+      abi: TamaPetABI,
       eventName: 'Mint',
       onLogs: (logs) => {
         for (const log of logs) {
-          const { tokenId, owner, blobCID, name } = log.args
-          if (tokenId == null || !owner || !blobCID || !name) continue
-          this.spawnPet({ tokenId: Number(tokenId), owner, blobCID, name })
+          // Cast needed: TS6 strips literal types from JSON ABI imports, so viem
+          // falls back to the untyped Log overload and args isn't inferred.
+          const { tokenId, owner, name, blobCID, archetype, traits, wallet } =
+            (log as unknown as { args: MintEventArgs }).args
+          if (tokenId == null || !owner || !name || !blobCID || archetype == null || traits == null || !wallet) continue
+          this.spawnPet({
+            tokenId:   Number(tokenId),
+            owner,
+            name,
+            blobCID,
+            archetype: Number(archetype),
+            traits,
+            wallet,
+          })
         }
       },
       onError: (err) => console.error('[Supervisor] watchContractEvent error:', err),
     })
   }
 
-  spawnPet({ tokenId, owner, blobCID, name }: MintArgs) {
+  spawnPet({ tokenId, owner, name, blobCID, archetype, traits, wallet }: MintArgs) {
     if (this.workers.has(tokenId)) {
       console.warn(`[Supervisor] Pet ${tokenId} already running`)
       return
@@ -59,9 +74,9 @@ export class PetSupervisor {
     generatePetAxlConfig(tokenId)
 
     this.db.prepare(`
-      INSERT OR IGNORE INTO pets (token_id, name, owner_address, blob_cid, ens_name, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(tokenId, name, owner, blobCID, `${name}.tama.eth`, Date.now())
+      INSERT OR IGNORE INTO pets (token_id, name, owner_address, wallet_address, blob_cid, archetype, ens_name, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(tokenId, name, owner, wallet, blobCID, archetype, `${name}.tama.eth`, Date.now())
 
     const workerPath = path.resolve(
       __dirname, '..', '..', '..', 'packages', 'pet-runtime', 'src', 'worker.ts'
@@ -70,10 +85,13 @@ export class PetSupervisor {
     const worker = fork(workerPath, [], {
       env: {
         ...process.env,
-        PET_ID:   String(tokenId),
-        BLOB_CID: blobCID,
-        ENS_NAME: name,
-        OWNER:    owner,
+        PET_ID:    String(tokenId),
+        BLOB_CID:  blobCID,
+        ENS_NAME:  name,
+        OWNER:     owner,
+        WALLET:    wallet,
+        ARCHETYPE: String(archetype),
+        TRAITS:    String(traits),
       },
       execArgv: ['--import', 'tsx'],
     })
@@ -90,7 +108,7 @@ export class PetSupervisor {
         console.log(`[Pet ${tokenId}]`, msg)
       }
     })
-    worker.on('error',   (err) => console.error(`[Pet ${tokenId}] error:`, err))
+    worker.on('error',  (err) => console.error(`[Pet ${tokenId}] error:`, err))
     worker.on('exit', (code) => {
       console.log(`[Pet ${tokenId}] exited (code ${code})`)
       this.workers.delete(tokenId)

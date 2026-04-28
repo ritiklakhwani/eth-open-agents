@@ -14,10 +14,11 @@ export function initDB(): BetterDB {
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS pets (
-      token_id      INTEGER PRIMARY KEY,
-      name          TEXT,
-      owner_address TEXT,
-      ens_name      TEXT,
+      token_id       INTEGER PRIMARY KEY,
+      name           TEXT,
+      owner_address  TEXT,
+      wallet_address TEXT,
+      ens_name       TEXT,
       peer_id       TEXT,
       blob_cid      TEXT,
       archetype     TEXT,

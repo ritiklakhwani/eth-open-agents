@@ -13,6 +13,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.9.0",
+    "contracts-sdk": "workspace:*",
     "dotenv": "^17.4.2",
     "fastify": "^5.8.5",
     "shared-types": "workspace:*",

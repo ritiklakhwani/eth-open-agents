@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import Fastify from 'fastify'
+import cors from '@fastify/cors'
 import { Server as SocketIOServer } from 'socket.io'
 import { EventEmitter } from 'events'
 import { initDB } from './db'
@@ -15,6 +16,7 @@ const supervisor = new PetSupervisor(db)
 
 // ── Fastify ───────────────────────────────────────────────────────────────────
 const app = Fastify({ logger: true })
+await app.register(cors, { origin: '*' })
 
 // ── REST routes ───────────────────────────────────────────────────────────────
 app.get('/api/pets', () =>

@@ -122,6 +122,15 @@ importers:
       better-sqlite3:
         specifier: ^12.9.0
         version: 12.9.0
+      dotenv:
+        specifier: ^17.4.2
+        version: 17.4.2
+      og-storage:
+        specifier: workspace:*
+        version: link:../og-storage
+      shared-types:
+        specifier: workspace:*
+        version: link:../shared-types
       viem:
         specifier: ^2.48.4
         version: 2.48.4(typescript@6.0.3)(zod@4.3.6)

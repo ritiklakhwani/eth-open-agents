@@ -74,7 +74,18 @@ export class PetSupervisor {
       execArgv: ['--import', 'tsx'],
     })
 
-    worker.on('message', (msg) => console.log(`[Pet ${tokenId}]`, msg))
+    worker.on('message', (msg: unknown) => {
+      const m = msg as Record<string, unknown>
+      if (m.type === 'peer-ready') {
+        // Worker booted and has its AXL peerId — update DB, then ENS (Phase 3)
+        this.db.prepare('UPDATE pets SET peer_id = ? WHERE token_id = ?')
+          .run(m.peerId, m.petId)
+        console.log(`[Supervisor] Pet ${m.petId} peer-ready: ${m.peerId}`)
+        // TODO Phase 3: call ens.mintPetSubname(m.ensName, m.peerId) once Ritik ships ens package
+      } else {
+        console.log(`[Pet ${tokenId}]`, msg)
+      }
+    })
     worker.on('error',   (err) => console.error(`[Pet ${tokenId}] error:`, err))
     worker.on('exit', (code) => {
       console.log(`[Pet ${tokenId}] exited (code ${code})`)

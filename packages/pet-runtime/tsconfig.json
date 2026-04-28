@@ -1,1 +1,10 @@
-{ "extends": "../../tsconfig.base.json" }
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": false
+  },
+  "include": ["src/**/*"]
+}

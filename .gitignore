@@ -23,3 +23,5 @@ broadcast/
 # Local data + binaries
 data/
 bin/axl-node
+ONBOARDING.md
+readme_files/

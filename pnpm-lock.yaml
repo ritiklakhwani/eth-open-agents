@@ -81,6 +81,9 @@ importers:
       socket.io-client:
         specifier: ^4.8.3
         version: 4.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10)
+      sprite-gen:
+        specifier: workspace:*
+        version: link:../../packages/sprite-gen
       viem:
         specifier: ^2.48.4
         version: 2.48.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@5.0.10)(zod@4.3.6)
@@ -192,7 +195,11 @@ importers:
 
   packages/shared-types: {}
 
-  packages/sprite-gen: {}
+  packages/sprite-gen:
+    dependencies:
+      replicate:
+        specifier: ^1.0.0
+        version: 1.4.0
 
 packages:
 

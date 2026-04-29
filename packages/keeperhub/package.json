@@ -2,7 +2,16 @@
   "name": "keeperhub",
   "version": "0.1.0",
   "private": true,
-  "description": "KeeperHub workflow SDK — 5 primitives (recurring, scheduled, conditional, event, chained) (Ritik / Phase 8)",
+  "description": "KeeperHub workflow SDK — 5 primitives (recurring, scheduled, conditional, event, chained)",
+  "type": "module",
   "main": "index.ts",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
 }

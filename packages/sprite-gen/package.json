@@ -4,5 +4,8 @@
   "private": true,
   "description": "Replicate API client for photo to pixel-art sprite (Ritik / Phase 7b)",
   "main": "index.ts",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "replicate": "^1.0.0"
+  }
 }

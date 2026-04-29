@@ -8,7 +8,7 @@ import { PetSupervisor } from './PetSupervisor'
 import type { Zone } from 'shared-types'
 
 // ── Shared event bus (pet workers → SSE clients) ─────────────────────────────
-export const petEvents = new EventEmitter()
+const petEvents = new EventEmitter()
 
 // ── DB + Supervisor ───────────────────────────────────────────────────────────
 const db         = initDB()
@@ -68,6 +68,7 @@ async function main() {
   const io = new SocketIOServer(app.server, {
     cors: { origin: '*' },
   })
+  supervisor.setIO(io)
 
   // In-memory position table: petId → { x, y, zone }
   const positions = new Map<number, { x: number; y: number; zone: Zone }>()

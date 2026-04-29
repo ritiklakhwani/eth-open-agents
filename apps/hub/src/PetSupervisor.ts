@@ -3,6 +3,7 @@ import path from 'path'
 import { createPublicClient, http } from 'viem'
 import { sepolia } from 'viem/chains'
 import { TamaPetABI, ADDRESSES_SEPOLIA } from 'contracts-sdk'
+import type { Server as SocketIOServer } from 'socket.io'
 import type { DB } from './db'
 import { generatePetAxlConfig } from './axl-config'
 
@@ -29,12 +30,17 @@ interface MintArgs {
 
 export class PetSupervisor {
   private workers = new Map<number, ChildProcess>()
+  private io?: SocketIOServer
   private client = createPublicClient({
     chain: sepolia,
     transport: http(process.env.SEPOLIA_RPC_URL),
   })
 
   constructor(private db: DB) {}
+
+  setIO(io: SocketIOServer) {
+    this.io = io
+  }
 
   async start() {
     console.log(`[Supervisor] Watching ${ADDRESSES_SEPOLIA.TamaPet} for Mint events`)
@@ -104,6 +110,14 @@ export class PetSupervisor {
           .run(m.peerId, m.petId)
         console.log(`[Supervisor] Pet ${m.petId} peer-ready: ${m.peerId}`)
         // TODO Phase 3: call ens.mintPetSubname(m.ensName, m.peerId) once Ritik ships ens package
+      } else if (m.type === 'chat-out') {
+        // Worker sent a chat message — forward to all socket clients as a chat bubble
+        this.io?.to('world').emit('chat', {
+          from:      m.petId,
+          to:        m.toPetId,
+          text:      m.text,
+          timestamp: Date.now(),
+        })
       } else {
         console.log(`[Pet ${tokenId}]`, msg)
       }

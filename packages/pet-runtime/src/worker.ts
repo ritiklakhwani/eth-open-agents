@@ -76,6 +76,7 @@ async function main() {
         await axl.send(withPeerId, { type: 'chat', text: opener, fromPetId: PET_ID })
         memory.add({ kind: 'chat', content: { text: opener, to: withName }, counterpartyPetId: withPetId })
         memory.strengthenFriendship(withPetId)
+        process.send?.({ type: 'chat-out', petId: PET_ID, toPetId: withPetId, text: opener })
       } catch (err) {
         console.error(`[Pet ${PET_ID}] chat-request error:`, (err as Error).message)
       }
@@ -98,6 +99,7 @@ async function main() {
         memory.add({ kind: 'chat', content: { text, from: incoming.from }, counterpartyPetId: fromId })
         memory.strengthenFriendship(fromId)
         await axl.send(incoming.from, { type: 'chat', text: reply, fromPetId: PET_ID })
+        process.send?.({ type: 'chat-out', petId: PET_ID, toPetId: fromId, text: reply })
 
       } else if (msg.type === 'park-hello') {
         console.log(`[Pet ${PET_ID}] Park hello from ${msg.fromName}`)

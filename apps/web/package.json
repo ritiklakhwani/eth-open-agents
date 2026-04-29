@@ -16,6 +16,7 @@
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "replicate": "^1.4.0",
+    "shared-types": "workspace:*",
     "sprite-gen": "workspace:*",
     "socket.io-client": "^4.8.3",
     "viem": "^2.48.4",

@@ -3,9 +3,11 @@
 import { useState } from 'react'
 import Link from 'next/link'
 import { PixelButton, PixelCard } from '@/components/ui'
+import { AdoptionFlow } from '@/components/AdoptionFlow'
 
 export default function Home() {
   const [showCredits, setShowCredits] = useState(false)
+  const [showAdopt, setShowAdopt] = useState(false)
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center px-6 py-12">
@@ -28,12 +30,15 @@ export default function Home() {
 
         {/* Action buttons */}
         <div className="flex flex-col sm:flex-row gap-6 items-center justify-center mb-16">
+          <PixelButton variant="primary" size="lg" onClick={() => setShowAdopt(true)}>
+            ★ ADOPT A PET
+          </PixelButton>
           <Link href="/world">
-            <PixelButton variant="primary" size="lg">
+            <PixelButton variant="secondary" size="lg">
               ▶ ENTER PETCITY
             </PixelButton>
           </Link>
-          <PixelButton variant="secondary" size="lg" onClick={() => setShowCredits((s) => !s)}>
+          <PixelButton variant="ghost" size="lg" onClick={() => setShowCredits((s) => !s)}>
             ? CREDITS
           </PixelButton>
         </div>
@@ -70,6 +75,8 @@ export default function Home() {
       <p className="font-[family-name:var(--font-pixel)] text-[10px] text-[color:var(--color-ink-low)] mt-auto pt-12">
         © 2026 PETCITY · PRESS START
       </p>
+
+      <AdoptionFlow open={showAdopt} onClose={() => setShowAdopt(false)} />
     </main>
   )
 }

@@ -10,15 +10,17 @@
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.10",
+    "contracts-sdk": "workspace:*",
     "framer-motion": "^12.38.0",
     "next": "16.2.4",
+    "og-storage": "workspace:*",
     "phaser": "^4.0.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "replicate": "^1.4.0",
     "shared-types": "workspace:*",
-    "sprite-gen": "workspace:*",
     "socket.io-client": "^4.8.3",
+    "sprite-gen": "workspace:*",
     "viem": "^2.48.4",
     "wagmi": "^3.6.6",
     "zod": "^4.3.6"

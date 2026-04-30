@@ -1,6 +1,15 @@
 import { writeFileSync, mkdirSync, existsSync } from 'fs'
 import { execSync } from 'child_process'
 import path from 'path'
+import { fileURLToPath } from 'url'
+
+// ESM doesn't expose __dirname; derive from import.meta.url. Repo root sits
+// 3 levels above this file: apps/hub/src/axl-config.ts. Anchoring to the file
+// (instead of process.cwd()) keeps config + key paths stable regardless of
+// where the hub was launched from.
+const __filename = fileURLToPath(import.meta.url)
+const __dirname  = path.dirname(__filename)
+const REPO_ROOT  = path.resolve(__dirname, '..', '..', '..')
 
 // Pet 0 is the bootstrap/rendezvous node — it Listens on P2P_BOOTSTRAP_PORT.
 // All other pets connect outbound to pet 0 and don't need to Listen.
@@ -18,9 +27,8 @@ export interface PetAxlConfig {
 }
 
 export function generatePetAxlConfig(petId: number): PetAxlConfig {
-  const repoRoot = path.resolve(process.cwd())
-  const configDir = path.join(repoRoot, 'data', 'axl-configs')
-  const keyDir = path.join(repoRoot, 'data', 'keys')
+  const configDir = path.join(REPO_ROOT, 'data', 'axl-configs')
+  const keyDir    = path.join(REPO_ROOT, 'data', 'keys')
 
   mkdirSync(configDir, { recursive: true })
   mkdirSync(keyDir, { recursive: true })

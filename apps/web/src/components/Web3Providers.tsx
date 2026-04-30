@@ -5,23 +5,54 @@
 // like useAccount(), useWriteContract(), etc.
 //
 // Notes:
-//   - We use wagmi's createConfig (not RainbowKit's getDefaultConfig) so we
-//     skip the WalletConnect / @reown/appkit dependency, which is what
-//     crashes Next.js static prerender with "indexedDB is not defined".
-//     RainbowKit's UI works fine with injected wallets only (MetaMask etc.).
+//   - We use connectorsForWallets with RainbowKit's wallet adapters so the
+//     ConnectButton modal shows branded "MetaMask", "Rainbow", "Coinbase Wallet"
+//     etc. rather than generic "Browser Wallet" entries.
+//   - We deliberately do NOT include WalletConnect — its underlying @reown/appkit
+//     touches indexedDB at module-eval time which crashes Next.js static
+//     prerender with "indexedDB is not defined".
 //   - cookieStorage keeps connection state SSR-safe.
 
 import { type ReactNode, useState } from 'react'
 import { WagmiProvider, createConfig, http, cookieStorage, createStorage } from 'wagmi'
 import { sepolia } from 'wagmi/chains'
-import { injected, metaMask } from 'wagmi/connectors'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { RainbowKitProvider, darkTheme } from '@rainbow-me/rainbowkit'
+import {
+  RainbowKitProvider,
+  darkTheme,
+  connectorsForWallets,
+} from '@rainbow-me/rainbowkit'
+import {
+  metaMaskWallet,
+  rainbowWallet,
+  coinbaseWallet,
+  injectedWallet,
+} from '@rainbow-me/rainbowkit/wallets'
 import '@rainbow-me/rainbowkit/styles.css'
+
+const connectors = connectorsForWallets(
+  [
+    {
+      groupName: 'Popular',
+      wallets: [metaMaskWallet, rainbowWallet, coinbaseWallet],
+    },
+    {
+      groupName: 'Other',
+      wallets: [injectedWallet],
+    },
+  ],
+  {
+    appName: 'PetCity',
+    // Even though we don't ship WalletConnect, connectorsForWallets requires
+    // a projectId. Using "demo" is fine for non-WC wallets; real WC flows
+    // would need a real id from cloud.reown.com.
+    projectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID ?? 'demo',
+  },
+)
 
 const config = createConfig({
   chains: [sepolia],
-  connectors: [injected(), metaMask()],
+  connectors,
   transports: {
     [sepolia.id]: http(process.env.NEXT_PUBLIC_SEPOLIA_RPC_URL),
   },

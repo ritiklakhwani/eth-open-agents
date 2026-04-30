@@ -23,6 +23,12 @@ export function World({ petId, socketServerUrl, onZoneEntered }: WorldProps) {
   const gameRef = useRef<unknown>(null) // Phaser.Game; typed loosely to avoid SSR import
   const [zone, setZone] = useState<Zone>('park')
 
+  // Latest-ref pattern: keep onZoneEntered out of the Phaser-init useEffect deps
+  // so the scene doesn't tear down + restart (which teleports the pet to spawn)
+  // every time the parent re-renders (e.g. on modal open/close).
+  const onZoneEnteredRef = useRef(onZoneEntered)
+  useEffect(() => { onZoneEnteredRef.current = onZoneEntered })
+
   useEffect(() => {
     if (!containerRef.current) return
 
@@ -42,6 +48,9 @@ export function World({ petId, socketServerUrl, onZoneEntered }: WorldProps) {
         parent: containerRef.current!,
         pixelArt: true,
         backgroundColor: '#0a0c2e',
+        // We don't play audio; disable Phaser's WebAudio context to silence
+        // the "Cannot suspend/resume a closed AudioContext" hot-reload spam.
+        audio: { noAudio: true },
         physics: {
           default: 'arcade',
           arcade: {
@@ -67,7 +76,7 @@ export function World({ petId, socketServerUrl, onZoneEntered }: WorldProps) {
         if (scene) {
           scene.events.on('zone-changed', (newZone: Zone) => {
             setZone(newZone)
-            onZoneEntered?.(newZone)
+            onZoneEnteredRef.current?.(newZone)
           })
         }
       }, 100)
@@ -79,7 +88,7 @@ export function World({ petId, socketServerUrl, onZoneEntered }: WorldProps) {
       canceled = true
       cleanup?.()
     }
-  }, [petId, socketServerUrl, onZoneEntered])
+  }, [petId, socketServerUrl])
 
   return (
     <div className="relative w-full h-screen overflow-hidden">

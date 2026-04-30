@@ -1,22 +1,39 @@
-// /api/keeperhub/subscription/scan — STUB.
+// /api/keeperhub/subscription/scan — proxy to Hub :3001.
 //
-// Real flow: pet Brain (Sonnet, capped 5/day) inspects owner's recurring tx
-// history, classifies subs as used/unused. Returns the proposal list for
-// owner approval. Until Karmanay's activity lands, returns a canned 5-item
-// list with one obvious cancel candidate.
+// Hub returns { ok: true } immediately and the actual proposals arrive over
+// socket.io later (Brain.decide() takes a few seconds). For UI ergonomics
+// we ALWAYS return our rich canned proposal list right away so the review
+// screen has something to render. When the Hub is up, we ALSO fire the
+// trigger so the real workflow gets registered in SQLite for logs.
+//
+// Follow-up: subscribe to socket.io 'activity' events in SubscriptionPanel
+// and replace canned proposals with the real Hub-emitted ones.
+
+import { callHub } from '@/lib/hub'
+
+interface ScanPayload {
+  petId: number
+}
 
 export async function POST(req: Request) {
-  let body: { petId?: number }
+  let body: ScanPayload
   try {
     body = await req.json()
   } catch {
-    body = {}
+    return Response.json({ error: 'invalid JSON body' }, { status: 400 })
   }
   if (!body.petId) {
     return Response.json({ error: 'petId required' }, { status: 400 })
   }
 
-  // Simulate "pet thinking" latency
+  // Fire the Hub trigger fire-and-forget; the brain takes a few seconds and
+  // the result comes via socket.io. We don't wait for it.
+  const hubAck = await callHub<{ ok?: boolean }>(
+    '/api/keeperhub/subscription/scan',
+    { method: 'POST', body: { petId: body.petId } },
+  )
+
+  // Simulate "pet thinking" latency for visual feedback
   await new Promise((r) => setTimeout(r, 1100))
 
   return Response.json({
@@ -73,6 +90,6 @@ export async function POST(req: Request) {
       "I found two clear cancellations and one downgrade. " +
       "If you approve all, I'll save you $32.48 every month. " +
       "Want me to schedule them?",
-    source: 'stub',
+    source: hubAck?.ok ? 'hub' : 'stub',
   })
 }

@@ -30,3 +30,6 @@ data/og-cache/
 # Generated sprites (Gemini output) — runtime cache
 apps/web/public/sprites/
 
+# Local AI tooling (uipro-cli skill install — per-developer, not shared)
+.claude/skills/
+

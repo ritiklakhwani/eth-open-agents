@@ -1,7 +1,9 @@
-import type { NextConfig } from "next";
+import type { NextConfig } from "next"
 
 const nextConfig: NextConfig = {
-  /* config options here */
-};
+  // Disable StrictMode — double-mounting in dev breaks Phaser scene lifecycle
+  // (two scenes, two sockets, race conditions). Re-enable later if needed.
+  reactStrictMode: false,
+}
 
-export default nextConfig;
+export default nextConfig

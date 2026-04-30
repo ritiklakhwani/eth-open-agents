@@ -1,4 +1,12 @@
-import 'dotenv/config'
+import { config as loadEnv } from 'dotenv'
+import path from 'path'
+import { fileURLToPath } from 'url'
+
+// Load .env from repo root (4 levels up from apps/hub/src/index.ts)
+const __filename = fileURLToPath(import.meta.url)
+const __dirname  = path.dirname(__filename)
+loadEnv({ path: path.resolve(__dirname, '..', '..', '..', '.env') })
+
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import { Server as SocketIOServer } from 'socket.io'

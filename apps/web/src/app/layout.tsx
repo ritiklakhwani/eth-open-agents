@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import { Press_Start_2P, VT323 } from "next/font/google"
 import "./globals.css"
 import { CRTOverlay } from "@/components/CRTOverlay"
+import { Web3Providers } from "@/components/Web3Providers"
 
 const pressStart2P = Press_Start_2P({
   variable: "--font-pixel",
@@ -31,8 +32,10 @@ export default function RootLayout({
       className={`${pressStart2P.variable} ${vt323.variable} h-full`}
     >
       <body className="min-h-full flex flex-col bg-[color:var(--color-bg-deep)] text-[color:var(--color-ink)]">
-        {children}
-        <CRTOverlay />
+        <Web3Providers>
+          {children}
+          <CRTOverlay />
+        </Web3Providers>
       </body>
     </html>
   )

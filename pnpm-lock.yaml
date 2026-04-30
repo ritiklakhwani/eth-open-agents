@@ -32,6 +32,9 @@ importers:
       fastify:
         specifier: ^5.8.5
         version: 5.8.5
+      keeperhub:
+        specifier: workspace:*
+        version: link:../../packages/keeperhub
       shared-types:
         specifier: workspace:*
         version: link:../../packages/shared-types
@@ -167,9 +170,15 @@ importers:
       better-sqlite3:
         specifier: ^12.9.0
         version: 12.9.0
+      contracts-sdk:
+        specifier: workspace:*
+        version: link:../contracts-sdk
       dotenv:
         specifier: ^17.4.2
         version: 17.4.2
+      keeperhub:
+        specifier: workspace:*
+        version: link:../keeperhub
       og-storage:
         specifier: workspace:*
         version: link:../og-storage

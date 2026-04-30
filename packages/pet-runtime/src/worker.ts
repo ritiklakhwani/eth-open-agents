@@ -5,6 +5,9 @@ import { AXLClient } from './axl'
 import { Brain } from './brain'
 import { Memory } from './memory'
 import { loadBlob, saveBlob } from './blob'
+import { sendMailboxGift } from './activities/mailbox'
+import { scanSubscriptions, approveSubscriptionCancellation } from './activities/subscription'
+import { runBattle, handleBattleInvite, handleBattleDebate, handleBattleJudge, battleBus, activeBattleIds } from './activities/battle'
 
 const PET_ID   = Number(process.env.PET_ID ?? '0')
 let   BLOB_CID = process.env.BLOB_CID ?? ''   // mutable — updated when 0G assigns a new root hash
@@ -67,10 +70,11 @@ async function main() {
   // ── 7. IPC — messages from PetSupervisor ─────────────────────────────────
   process.on('message', async (msg: unknown) => {
     const m = msg as Record<string, unknown>
+
     if (m.type === 'chat-request') {
-      const withPetId = m.withPetId as number
+      const withPetId  = m.withPetId  as number
       const withPeerId = m.withPeerId as string
-      const withName   = m.withName as string
+      const withName   = m.withName   as string
       try {
         const opener = await brain.meetingOpener(withName)
         await axl.send(withPeerId, { type: 'chat', text: opener, fromPetId: PET_ID })
@@ -80,6 +84,61 @@ async function main() {
       } catch (err) {
         console.error(`[Pet ${PET_ID}] chat-request error:`, (err as Error).message)
       }
+
+    } else if (m.type === 'mailbox-send') {
+      try {
+        const result = await sendMailboxGift({
+          fromPetId:           PET_ID,
+          toPetId:             m.toPetId             as number,
+          toPetEnsName:        m.toPetEnsName         as string,
+          toPetWalletAddress:  m.toPetWalletAddress   as `0x${string}`,
+          amountUSDC:          m.amountUSDC           as string,
+          walletIntegrationId: m.walletIntegrationId  as string,
+        })
+        process.send?.({ type: 'mailbox-queued', petId: PET_ID, toPetId: m.toPetId, workflowId: result.workflowId })
+      } catch (err) {
+        console.error(`[Pet ${PET_ID}] mailbox-send error:`, (err as Error).message)
+      }
+
+    } else if (m.type === 'subscription-scan') {
+      try {
+        const proposals = await scanSubscriptions(brain, process.env.OWNER ?? '')
+        process.send?.({ type: 'subscription-proposals', petId: PET_ID, proposals })
+      } catch (err) {
+        console.error(`[Pet ${PET_ID}] subscription-scan error:`, (err as Error).message)
+      }
+
+    } else if (m.type === 'subscription-approve') {
+      try {
+        const result = await approveSubscriptionCancellation({
+          ownerAddress:        (process.env.OWNER ?? '') as `0x${string}`,
+          subscriptionId:      m.subscriptionId      as number,
+          walletIntegrationId: m.walletIntegrationId as string,
+        })
+        process.send?.({ type: 'subscription-created', petId: PET_ID, workflowId: result.workflowId, subscriptionId: m.subscriptionId })
+      } catch (err) {
+        console.error(`[Pet ${PET_ID}] subscription-approve error:`, (err as Error).message)
+      }
+
+    } else if (m.type === 'battle-start') {
+      runBattle(axl, brain, memory, {
+        battleId:    m.battleId    as string,
+        myPetId:     PET_ID,
+        myWallet:    m.myWallet    as `0x${string}`,
+        withPetId:   m.withPetId   as number,
+        withPeerId:  m.withPeerId  as string,
+        withName:    m.withName    as string,
+        withWallet:  m.withWallet  as `0x${string}`,
+        stakeAmount: m.stakeAmount as string,
+        judges:      m.judges      as Array<{ petId: number; peerId: string }>,
+      })
+      .then(result => {
+        process.send?.({ type: 'battle-result', petId: PET_ID, battleId: m.battleId, ...result })
+      })
+      .catch((err: Error) => {
+        console.error(`[Pet ${PET_ID}] battle error:`, err.message)
+        process.send?.({ type: 'battle-result', petId: PET_ID, battleId: m.battleId, winner: -1, text: err.message })
+      })
     }
   })
 
@@ -108,6 +167,33 @@ async function main() {
       } else if (msg.type === 'gift') {
         console.log(`[Pet ${PET_ID}] Gift received from ${msg.fromPetId}: ${JSON.stringify(msg.payload)}`)
         memory.add({ kind: 'event', content: { event: 'gift', payload: msg.payload }, counterpartyPetId: msg.fromPetId as number })
+
+      } else if (msg.type === 'battle-invite') {
+        handleBattleInvite(axl, incoming.from, { battleId: msg.battleId as string, fromPetId: msg.fromPetId as number }, PET_ID)
+          .catch((err: Error) => console.error(`[Pet ${PET_ID}] battle-invite error:`, err.message))
+
+      } else if (msg.type === 'battle-debate') {
+        const bId = msg.battleId as string
+        if (activeBattleIds.has(bId)) {
+          // We're driving this battle — route opponent's response to battleBus
+          battleBus.emit(`${bId}:battle-debate-${msg.round}`, msg)
+        } else {
+          // We're the passive participant — generate and send a rebuttal
+          handleBattleDebate(
+            axl, brain, memory, incoming.from,
+            msg as { battleId: string; round: number; text: string; fromPetId: number },
+            PET_ID,
+          ).catch((err: Error) => console.error(`[Pet ${PET_ID}] battle-debate error:`, err.message))
+        }
+
+      } else if (msg.type === 'battle-judge') {
+        handleBattleJudge(
+          axl, brain, incoming.from,
+          msg as { battleId: string; transcript: unknown[]; pet1Id: number; pet2Id: number },
+        ).catch((err: Error) => console.error(`[Pet ${PET_ID}] battle-judge error:`, err.message))
+
+      } else if (msg.type === 'battle-accept' || msg.type === 'battle-vote') {
+        battleBus.emit(`${msg.battleId as string}:${msg.type}`, msg)
       }
     } catch (err) {
       console.error(`[Pet ${PET_ID}] recv error:`, (err as Error).message)

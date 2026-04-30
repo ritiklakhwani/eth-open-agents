@@ -1,4 +1,4 @@
-import Phaser from 'phaser'
+import * as Phaser from 'phaser'
 import type { Zone } from 'shared-types'
 
 const VALID_ZONES = new Set<string>(['park', 'office', 'arena', 'lounge', 'kitchen', 'mailbox'])

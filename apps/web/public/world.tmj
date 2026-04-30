@@ -1,0 +1,105 @@
+{
+  "compressionlevel": -1,
+  "height": 30,
+  "infinite": false,
+  "layers": [
+    {
+      "name": "zones",
+      "type": "objectgroup",
+      "objects": [
+        {
+          "id": 1,
+          "name": "park",
+          "x": 0,
+          "y": 0,
+          "width": 480,
+          "height": 480,
+          "visible": true,
+          "type": "",
+          "properties": [
+            { "name": "color", "type": "string", "value": "#1e4d2b" }
+          ]
+        },
+        {
+          "id": 2,
+          "name": "office",
+          "x": 480,
+          "y": 0,
+          "width": 480,
+          "height": 480,
+          "visible": true,
+          "type": "",
+          "properties": [
+            { "name": "color", "type": "string", "value": "#3a3158" }
+          ]
+        },
+        {
+          "id": 3,
+          "name": "arena",
+          "x": 0,
+          "y": 480,
+          "width": 480,
+          "height": 480,
+          "visible": true,
+          "type": "",
+          "properties": [
+            { "name": "color", "type": "string", "value": "#5e1c1c" }
+          ]
+        },
+        {
+          "id": 4,
+          "name": "lounge",
+          "x": 480,
+          "y": 480,
+          "width": 320,
+          "height": 480,
+          "visible": true,
+          "type": "",
+          "properties": [
+            { "name": "color", "type": "string", "value": "#1a3a5a" }
+          ]
+        },
+        {
+          "id": 5,
+          "name": "kitchen",
+          "x": 800,
+          "y": 480,
+          "width": 320,
+          "height": 240,
+          "visible": true,
+          "type": "",
+          "properties": [
+            { "name": "color", "type": "string", "value": "#4a3a1c" }
+          ]
+        },
+        {
+          "id": 6,
+          "name": "mailbox",
+          "x": 800,
+          "y": 720,
+          "width": 320,
+          "height": 240,
+          "visible": true,
+          "type": "",
+          "properties": [
+            { "name": "color", "type": "string", "value": "#3a1c4a" }
+          ]
+        }
+      ],
+      "opacity": 1,
+      "visible": true,
+      "x": 0,
+      "y": 0
+    }
+  ],
+  "nextlayerid": 2,
+  "nextobjectid": 7,
+  "orientation": "orthogonal",
+  "renderorder": "right-down",
+  "tiledversion": "1.10.2",
+  "tileheight": 32,
+  "tilewidth": 32,
+  "type": "map",
+  "version": "1.10",
+  "width": 36
+}

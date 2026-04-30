@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import Link from 'next/link'
 import { PixelButton, PixelCard } from '@/components/ui'
 
 export default function Home() {
@@ -27,9 +28,11 @@ export default function Home() {
 
         {/* Action buttons */}
         <div className="flex flex-col sm:flex-row gap-6 items-center justify-center mb-16">
-          <PixelButton variant="primary" size="lg">
-            ▶ START
-          </PixelButton>
+          <Link href="/world">
+            <PixelButton variant="primary" size="lg">
+              ▶ ENTER PETCITY
+            </PixelButton>
+          </Link>
           <PixelButton variant="secondary" size="lg" onClick={() => setShowCredits((s) => !s)}>
             ? CREDITS
           </PixelButton>

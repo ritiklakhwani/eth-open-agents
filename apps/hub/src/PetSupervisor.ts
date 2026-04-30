@@ -1,11 +1,17 @@
 import { fork, type ChildProcess } from 'child_process'
 import path from 'path'
+import { fileURLToPath } from 'url'
 import { createPublicClient, http } from 'viem'
 import { sepolia } from 'viem/chains'
 import { TamaPetABI, ADDRESSES_SEPOLIA } from 'contracts-sdk'
 import type { Server as SocketIOServer } from 'socket.io'
 import type { DB } from './db'
 import { generatePetAxlConfig } from './axl-config'
+
+// ESM doesn't expose __dirname; derive from import.meta.url so child-process
+// fork paths resolve correctly when the hub runs via tsx in module mode.
+const __filename = fileURLToPath(import.meta.url)
+const __dirname  = path.dirname(__filename)
 
 // Shape of the Mint event args as emitted by TamaPet.sol
 interface MintEventArgs {
@@ -84,11 +90,15 @@ export class PetSupervisor {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(tokenId, name, owner, wallet, blobCID, archetype, `${name}.tama.eth`, Date.now())
 
-    const workerPath = path.resolve(
-      __dirname, '..', '..', '..', 'packages', 'pet-runtime', 'src', 'worker.ts'
-    )
+    // Repo root sits 3 levels above this file: apps/hub/src/PetSupervisor.ts
+    const repoRoot   = path.resolve(__dirname, '..', '..', '..')
+    const workerPath = path.join(repoRoot, 'packages', 'pet-runtime', 'src', 'worker.ts')
 
     const worker = fork(workerPath, [], {
+      // Pin child's cwd to the repo root. The worker resolves the AXL binary +
+      // axl-config files relative to process.cwd(), which would otherwise
+      // inherit the hub's cwd (apps/hub) and miss the binary at <repo>/bin/axl-node.
+      cwd: repoRoot,
       env: {
         ...process.env,
         PET_ID:    String(tokenId),

@@ -156,11 +156,18 @@ export class WorldScene extends Phaser.Scene {
     const body = this.player.body as Phaser.Physics.Arcade.Body
     const SPEED = 180
 
+    // If the user is typing in an input/textarea (e.g. mailbox compose form),
+    // ignore movement keys so WASD lands in the form, not the player.
+    const focused = (typeof document !== 'undefined' ? document.activeElement : null) as HTMLElement | null
+    const typing = focused && (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA' || focused.isContentEditable)
+
     let vx = 0, vy = 0
-    if (this.cursors.left.isDown || this.wasd.A.isDown) vx = -SPEED
-    if (this.cursors.right.isDown || this.wasd.D.isDown) vx = SPEED
-    if (this.cursors.up.isDown || this.wasd.W.isDown) vy = -SPEED
-    if (this.cursors.down.isDown || this.wasd.S.isDown) vy = SPEED
+    if (!typing) {
+      if (this.cursors.left.isDown  || this.wasd.A.isDown) vx = -SPEED
+      if (this.cursors.right.isDown || this.wasd.D.isDown) vx = SPEED
+      if (this.cursors.up.isDown    || this.wasd.W.isDown) vy = -SPEED
+      if (this.cursors.down.isDown  || this.wasd.S.isDown) vy = SPEED
+    }
 
     body.setVelocity(vx, vy)
 

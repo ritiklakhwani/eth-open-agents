@@ -2,13 +2,23 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
+import { useAccount } from 'wagmi'
+import { ConnectButton } from '@rainbow-me/rainbowkit'
 import { PixelButton, PixelCard } from '@/components/ui'
+import { AdoptionFlow } from '@/components/AdoptionFlow'
 
 export default function Home() {
   const [showCredits, setShowCredits] = useState(false)
+  const [showAdopt, setShowAdopt] = useState(false)
+  const { address } = useAccount()
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center px-6 py-12">
+    <main className="flex min-h-screen flex-col items-center justify-center px-6 py-12 relative">
+      {/* Top-right: wallet connect */}
+      <div className="absolute top-4 right-4 z-10">
+        <ConnectButton showBalance={false} chainStatus="icon" />
+      </div>
+
       {/* Hero — Press Start 2P retro game splash */}
       <div className="text-center max-w-3xl mx-auto">
         <p className="font-[family-name:var(--font-pixel)] text-xs text-[color:var(--color-cyan)] tracking-[0.3em] mb-6 animate-blink">
@@ -28,12 +38,15 @@ export default function Home() {
 
         {/* Action buttons */}
         <div className="flex flex-col sm:flex-row gap-6 items-center justify-center mb-16">
+          <PixelButton variant="primary" size="lg" onClick={() => setShowAdopt(true)}>
+            ★ ADOPT A PET
+          </PixelButton>
           <Link href="/world">
-            <PixelButton variant="primary" size="lg">
+            <PixelButton variant="secondary" size="lg">
               ▶ ENTER PETCITY
             </PixelButton>
           </Link>
-          <PixelButton variant="secondary" size="lg" onClick={() => setShowCredits((s) => !s)}>
+          <PixelButton variant="ghost" size="lg" onClick={() => setShowCredits((s) => !s)}>
             ? CREDITS
           </PixelButton>
         </div>
@@ -70,6 +83,12 @@ export default function Home() {
       <p className="font-[family-name:var(--font-pixel)] text-[10px] text-[color:var(--color-ink-low)] mt-auto pt-12">
         © 2026 PETCITY · PRESS START
       </p>
+
+      <AdoptionFlow
+        open={showAdopt}
+        onClose={() => setShowAdopt(false)}
+        ownerAddress={address}
+      />
     </main>
   )
 }

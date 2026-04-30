@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { Zone } from 'shared-types'
+import { PetInspector } from './PetInspector'
 
 interface WorldProps {
   petId: number
@@ -94,6 +95,11 @@ export function World({ petId, socketServerUrl, onZoneEntered }: WorldProps) {
             {zone.toUpperCase()}
           </p>
         </div>
+      </div>
+
+      {/* Top-right HUD: pet inspector (stats, ENS, friends) */}
+      <div className="pointer-events-none absolute top-4 right-4 z-10">
+        <PetInspector petId={petId} />
       </div>
 
       {/* Bottom-center: controls hint */}

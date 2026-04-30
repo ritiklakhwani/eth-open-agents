@@ -27,3 +27,6 @@ ONBOARDING.md
 readme_files/
 data/og-cache/
 
+# Generated sprites (Gemini output) — runtime cache
+apps/web/public/sprites/
+

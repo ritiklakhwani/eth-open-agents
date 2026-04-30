@@ -9,6 +9,7 @@ loadEnv({ path: path.resolve(__dirname, '..', '..', '..', '.env') })
 
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
+import { randomBytes } from 'crypto'
 import { Server as SocketIOServer } from 'socket.io'
 import { EventEmitter } from 'events'
 import { initDB } from './db'
@@ -67,6 +68,106 @@ app.get<{ Params: { petId: string } }>('/api/sse/:petId', (req, reply) => {
     petEvents.off(`pet:${petId}`, onEvent)
   })
 })
+
+// ── KeeperHub: mailbox send ───────────────────────────────────────────────────
+app.post<{ Body: { fromPetId: number; toPetId: number; amountUSDC: string } }>(
+  '/api/keeperhub/mailbox/send',
+  (req, reply) => {
+    const { fromPetId, toPetId, amountUSDC } = req.body
+    const toPet = db.prepare('SELECT ens_name, wallet_address FROM pets WHERE token_id = ?')
+      .get(toPetId) as { ens_name: string; wallet_address: string } | undefined
+    if (!toPet) return reply.status(404).send({ error: 'Recipient pet not found' })
+
+    supervisor.broadcast(fromPetId, {
+      type:                'mailbox-send',
+      toPetId,
+      toPetEnsName:        toPet.ens_name,
+      toPetWalletAddress:  toPet.wallet_address,
+      amountUSDC,
+      walletIntegrationId: process.env.KEEPERHUB_WALLET_INTEGRATION_ID ?? '',
+    })
+    return { ok: true }
+  },
+)
+
+// ── KeeperHub: subscription scan + approve ────────────────────────────────────
+app.post<{ Body: { petId: number } }>('/api/keeperhub/subscription/scan', (req) => {
+  supervisor.broadcast(req.body.petId, { type: 'subscription-scan' })
+  return { ok: true }
+})
+
+app.post<{ Body: { petId: number; subscriptionId: number } }>(
+  '/api/keeperhub/subscription/approve',
+  (req) => {
+    const { petId, subscriptionId } = req.body
+    supervisor.broadcast(petId, {
+      type:                'subscription-approve',
+      subscriptionId,
+      walletIntegrationId: process.env.KEEPERHUB_WALLET_INTEGRATION_ID ?? '',
+    })
+    return { ok: true }
+  },
+)
+
+// ── Battle: start ─────────────────────────────────────────────────────────────
+app.post<{ Body: { petAId: number; petBId: number; stakeAmount: string } }>(
+  '/api/battle/start',
+  (req, reply) => {
+    const { petAId, petBId, stakeAmount } = req.body
+    type PetRow = { peer_id: string | null; name: string; wallet_address: string }
+    const petA = db.prepare('SELECT peer_id, name, wallet_address FROM pets WHERE token_id = ?').get(petAId) as PetRow | undefined
+    const petB = db.prepare('SELECT peer_id, name, wallet_address FROM pets WHERE token_id = ?').get(petBId) as PetRow | undefined
+    if (!petA?.peer_id || !petB?.peer_id) return reply.status(400).send({ error: 'Pets not ready' })
+
+    const judges = db.prepare(
+      'SELECT token_id, peer_id FROM pets WHERE token_id NOT IN (?, ?) AND peer_id IS NOT NULL LIMIT 3'
+    ).all(petAId, petBId) as Array<{ token_id: number; peer_id: string }>
+
+    const battleId = `battle-${randomBytes(8).toString('hex')}`
+    supervisor.broadcast(petAId, {
+      type:        'battle-start',
+      battleId,
+      myWallet:    petA.wallet_address,
+      withPetId:   petBId,
+      withPeerId:  petB.peer_id,
+      withName:    petB.name,
+      withWallet:  petB.wallet_address,
+      stakeAmount,
+      judges:      judges.map(j => ({ petId: j.token_id, peerId: j.peer_id })),
+    })
+    return { ok: true, battleId }
+  },
+)
+
+// ── Adoption transfer webhook (called by KeeperHub workflow) ──────────────────
+app.post<{ Body: { tokenId: string; from: string; to: string } }>(
+  '/api/adoption-transfer',
+  (req) => {
+    const { tokenId, from, to } = req.body
+    db.prepare('UPDATE pets SET owner_address = ? WHERE token_id = ?').run(to, Number(tokenId))
+    console.log(`[Hub] Adoption transfer: pet ${tokenId} ${from} → ${to}`)
+    return { ok: true }
+  },
+)
+
+// ── Adoption chain bootstrap (idempotent, runs once at startup) ───────────────
+async function bootstrapAdoptionChain() {
+  const existing = db.prepare("SELECT id FROM keeperhub_workflows WHERE kind = 'adoption-chain' LIMIT 1").get()
+  if (existing) return
+  const { connectKeeperHub, createAdoptionTransferChain } = await import('keeperhub')
+  const client = await connectKeeperHub()
+  try {
+    const workflow = await createAdoptionTransferChain(client, {
+      walletIntegrationId: process.env.KEEPERHUB_WALLET_INTEGRATION_ID ?? '',
+    })
+    db.prepare(
+      'INSERT OR IGNORE INTO keeperhub_workflows (id, pet_id, kind, status, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(workflow.id, 0, 'adoption-chain', 'active', JSON.stringify(workflow), Date.now())
+    console.log('[Hub] Adoption chain workflow registered:', workflow.id)
+  } finally {
+    await client.close()
+  }
+}
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 async function main() {
@@ -147,6 +248,7 @@ async function main() {
   }, 2_000)
 
   await supervisor.start()
+  bootstrapAdoptionChain().catch(err => console.error('[Hub] adoption-chain bootstrap failed:', err.message))
   console.log('[Hub] Ready on http://localhost:3001')
 }
 

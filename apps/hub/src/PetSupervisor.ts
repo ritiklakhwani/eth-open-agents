@@ -111,13 +111,36 @@ export class PetSupervisor {
         console.log(`[Supervisor] Pet ${m.petId} peer-ready: ${m.peerId}`)
         // TODO Phase 3: call ens.mintPetSubname(m.ensName, m.peerId) once Ritik ships ens package
       } else if (m.type === 'chat-out') {
-        // Worker sent a chat message — forward to all socket clients as a chat bubble
         this.io?.to('world').emit('chat', {
-          from:      m.petId,
-          to:        m.toPetId,
-          text:      m.text,
-          timestamp: Date.now(),
+          from: m.petId, to: m.toPetId, text: m.text, timestamp: Date.now(),
         })
+
+      } else if (m.type === 'mailbox-queued') {
+        this.db.prepare(
+          'INSERT OR IGNORE INTO keeperhub_workflows (id, pet_id, kind, status, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+        ).run(m.workflowId, m.petId, 'mailbox', 'active', JSON.stringify(m), Date.now())
+        this.io?.to('world').emit('activity', {
+          type: 'mailbox-queued', petId: m.petId, toPetId: m.toPetId, workflowId: m.workflowId, timestamp: Date.now(),
+        })
+
+      } else if (m.type === 'subscription-proposals') {
+        this.io?.to('world').emit('activity', {
+          type: 'subscription-proposals', petId: m.petId, proposals: m.proposals, timestamp: Date.now(),
+        })
+
+      } else if (m.type === 'subscription-created') {
+        this.db.prepare(
+          'INSERT OR IGNORE INTO keeperhub_workflows (id, pet_id, kind, status, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+        ).run(m.workflowId, m.petId, 'subscription', 'active', JSON.stringify(m), Date.now())
+        this.io?.to('world').emit('activity', {
+          type: 'subscription-created', petId: m.petId, workflowId: m.workflowId, subscriptionId: m.subscriptionId, timestamp: Date.now(),
+        })
+
+      } else if (m.type === 'battle-result') {
+        this.io?.to('world').emit('activity', {
+          type: 'battle-result', petId: m.petId, battleId: m.battleId, winner: m.winner, text: m.text, timestamp: Date.now(),
+        })
+
       } else {
         console.log(`[Pet ${tokenId}]`, msg)
       }

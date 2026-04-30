@@ -189,9 +189,8 @@ export async function handleBattleJudge(
     'Vote for the winner of this debate battle. Respond with only the pet ID number.',
     { transcript: msg.transcript, pet1Id: msg.pet1Id, pet2Id: msg.pet2Id },
   )
-  // If the decision text contains pet1's id (and not pet2's exclusively), vote pet1
-  const vote = decision.includes(String(msg.pet1Id)) && !decision.includes(String(msg.pet2Id))
-    ? msg.pet1Id
-    : msg.pet2Id
+  const c1 = (decision.match(new RegExp(String(msg.pet1Id), 'g')) ?? []).length
+  const c2 = (decision.match(new RegExp(String(msg.pet2Id), 'g')) ?? []).length
+  const vote = c1 >= c2 ? msg.pet1Id : msg.pet2Id
   await axl.send(fromPeer, { type: 'battle-vote', battleId: msg.battleId, vote, fromPetId: -1 })
 }

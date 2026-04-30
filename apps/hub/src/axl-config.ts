@@ -38,19 +38,25 @@ export function generatePetAxlConfig(petId: number): PetAxlConfig {
     execSync(`openssl genpkey -algorithm ed25519 -out "${keyPath}"`)
   }
 
-  // api_port: 9001, 9101, 9201 ... (HTTP API — what we curl /send /recv /topology)
-  // tcp_port: fixed at 7000 for ALL pets. AXL uses the sender's tcp_port as the
-  // destination port when delivering messages over gVisor. Each pet has its own
-  // isolated gVisor virtual network stack, so port 7000 on each is independent.
-  // Pet 0 listens on P2P_BOOTSTRAP_PORT for incoming peer connections.
-  // Pet N>0 connects outbound to pet 0 and leaves Listen empty.
+  // api_port:  9001, 9101, 9201 … (HTTP API — what we POST /send to)
+  // tcp_port:  7000, 7100, 7200 … (unique per pet so AXL can route via
+  //            127.0.0.1:tcp_port instead of the gVisor virtual IPv6 that
+  //            is unreachable across isolated namespaces).
+  // Every pet explicitly Listen-s on its tcp_port so the address is
+  // advertised to peers during bootstrap and is host-reachable.
+  // Pet 0 additionally Listen-s on P2P_BOOTSTRAP_PORT so others can dial in.
+  const TCP_PORT = 7000 + petId * 100
+
   const config = {
     PrivateKeyPath: keyPath,
     Peers: petId === 0 ? [] : [`tls://127.0.0.1:${P2P_BOOTSTRAP_PORT}`],
-    Listen: petId === 0 ? [`tls://0.0.0.0:${P2P_BOOTSTRAP_PORT}`] : [],
+    Listen: [
+      `tls://0.0.0.0:${TCP_PORT}`,
+      ...(petId === 0 ? [`tls://0.0.0.0:${P2P_BOOTSTRAP_PORT}`] : []),
+    ],
     api_port: 9001 + petId * 100,
     bridge_addr: '127.0.0.1',
-    tcp_port: 7000,
+    tcp_port: TCP_PORT,
     max_concurrent_conns: 16,
   }
 

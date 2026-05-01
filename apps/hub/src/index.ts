@@ -90,6 +90,68 @@ app.post<{ Body: { fromPetId: number; toPetId: number; amountUSDC: string } }>(
   },
 )
 
+// ── KeeperHub: mailbox inbox (real workflow state) ────────────────────────────
+// Returns mailbox workflows touching this pet, split into:
+//   inbox   — gifts addressed to me (payload.toPetId === petId)
+//   pending — gifts I sent that are queued (pet_id === petId, status active)
+// Display names resolved via the pets table.
+app.get<{ Querystring: { petId: string } }>(
+  '/api/keeperhub/mailbox/inbox',
+  (req, reply) => {
+    const petId = Number(req.query.petId)
+    if (!Number.isFinite(petId)) {
+      return reply.status(400).send({ error: 'petId required' })
+    }
+
+    type Row = { id: string; pet_id: number; status: string; payload: string | null; created_at: number }
+    const rows = db.prepare(
+      "SELECT id, pet_id, status, payload, created_at FROM keeperhub_workflows WHERE kind = 'mailbox' ORDER BY created_at DESC",
+    ).all() as Row[]
+
+    const petNames = new Map<number, string>()
+    const petRows = db.prepare('SELECT token_id, ens_name, name FROM pets').all() as Array<{ token_id: number; ens_name: string | null; name: string | null }>
+    for (const p of petRows) {
+      petNames.set(p.token_id, p.ens_name ?? p.name ?? `pet-${p.token_id}`)
+    }
+
+    interface InboxItem { id: string; from: string; message: string; giftAmountUsdc: number; deliveredAt: number; status: string }
+    interface PendingItem { id: string; to: string; message: string; giftAmountUsdc: number; triggerCondition: string; status: string }
+    const inbox: InboxItem[] = []
+    const pending: PendingItem[] = []
+
+    for (const r of rows) {
+      let payload: { toPetId?: number; amountUSDC?: string | number } = {}
+      try { payload = JSON.parse(r.payload ?? '{}') } catch {}
+      const toPetId = typeof payload.toPetId === 'number' ? payload.toPetId : undefined
+      const amount = Number(payload.amountUSDC ?? 0) || 0
+
+      if (toPetId === petId) {
+        inbox.push({
+          id: r.id,
+          from: petNames.get(r.pet_id) ?? `pet-${r.pet_id}`,
+          message: '',
+          giftAmountUsdc: amount,
+          deliveredAt: r.created_at,
+          status: r.status,
+        })
+      }
+
+      if (r.pet_id === petId && r.status === 'active') {
+        pending.push({
+          id: r.id,
+          to: toPetId !== undefined ? (petNames.get(toPetId) ?? `pet-${toPetId}`) : 'unknown',
+          message: '',
+          giftAmountUsdc: amount,
+          triggerCondition: 'recipient ENS lastSeenBlock within 5 of head',
+          status: r.status,
+        })
+      }
+    }
+
+    return { petId, inbox, pending }
+  },
+)
+
 // ── KeeperHub: subscription scan + approve ────────────────────────────────────
 app.post<{ Body: { petId: number } }>('/api/keeperhub/subscription/scan', (req) => {
   supervisor.broadcast(req.body.petId, { type: 'subscription-scan' })

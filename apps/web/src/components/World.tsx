@@ -10,6 +10,8 @@ interface WorldProps {
   socketServerUrl?: string
   /** Callback when player enters a zone (for opening modals etc.) */
   onZoneEntered?: (zone: Zone) => void
+  /** Callback when user clicks the BREED button on the pet inspector */
+  onBreed?: () => void
 }
 
 /**
@@ -18,7 +20,7 @@ interface WorldProps {
  *
  * Phaser is dynamically imported because it touches `window` and breaks SSR.
  */
-export function World({ petId, socketServerUrl, onZoneEntered }: WorldProps) {
+export function World({ petId, socketServerUrl, onZoneEntered, onBreed }: WorldProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const gameRef = useRef<unknown>(null) // Phaser.Game; typed loosely to avoid SSR import
   const [zone, setZone] = useState<Zone>('park')
@@ -108,7 +110,7 @@ export function World({ petId, socketServerUrl, onZoneEntered }: WorldProps) {
 
       {/* Top-right HUD: pet inspector (stats, ENS, friends) */}
       <div className="pointer-events-none absolute top-4 right-4 z-10">
-        <PetInspector petId={petId} />
+        <PetInspector petId={petId} onBreed={onBreed} />
       </div>
 
       {/* Bottom-center: controls hint */}

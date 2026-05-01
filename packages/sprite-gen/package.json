@@ -1,12 +1,12 @@
 {
   "name": "sprite-gen",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "Gemini 2.5 Flash Image client for photo / prompt to pixel-art sprite",
+  "description": "OpenAI gpt-image-1 (image-to-image) with Pollinations.ai fallback",
   "main": "index.ts",
   "license": "MIT",
   "dependencies": {
-    "@google/genai": "^1.0.0",
+    "openai": "^4.77.0",
     "sharp": "^0.33.5"
   }
 }

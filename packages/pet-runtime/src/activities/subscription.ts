@@ -51,7 +51,7 @@ export async function approveSubscriptionCancellation(args: {
   ownerAddress:        `0x${string}`
   subscriptionId:      number
   walletIntegrationId: string
-}): Promise<{ workflowId: string }> {
+}): Promise<{ workflowId: string; executed: boolean }> {
   const client = await connectKeeperHub()
   try {
     const workflow = await createSubscriptionCancellation(client, {
@@ -59,7 +59,21 @@ export async function approveSubscriptionCancellation(args: {
       subscriptionId:      args.subscriptionId,
       walletIntegrationId: args.walletIntegrationId,
     })
-    return { workflowId: workflow.id }
+
+    // The workflow uses a Manual trigger — register-only doesn't fire on its
+    // own. Execute it now so the cancelSub(id) tx actually lands on Sepolia
+    // and the SubscriptionCancelled event emits.
+    let executed = false
+    try {
+      await client.callTool('execute_workflow', { id: workflow.id })
+      executed = true
+    } catch (err) {
+      console.warn(
+        `[subscription] execute_workflow failed for ${workflow.id}: ${(err as Error).message.slice(0, 100)}`,
+      )
+    }
+
+    return { workflowId: workflow.id, executed }
   } finally {
     await client.close()
   }

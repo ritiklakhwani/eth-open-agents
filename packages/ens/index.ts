@@ -137,6 +137,11 @@ function makeWalletClient(rpcUrl: string, privateKey: Hex): WalletClient {
 
 export interface MintPetSubnameArgs {
   petName: string
+  /// Parent ENS name. Defaults to "tama" → mints <petName>.tama.eth (top-level pet).
+  /// For breeding lineage, pass parent's pet name → mints <petName>.<parentName>.tama.eth.
+  /// The parent must already be registered + wrapped in NameWrapper for setSubnodeRecord
+  /// to work — pet subnames minted via this helper are auto-wrapped, so they qualify.
+  parentName?: string
   petWalletAddress: Address  // pet's CREATE2 smart wallet (addr() target)
   peerId: string             // AXL ed25519 pubkey
   blobCID: string            // 0G Storage CID
@@ -154,15 +159,26 @@ export async function mintPetSubname(args: MintPetSubnameArgs): Promise<{
   subnameTxHash: Hex
   setAddrTxHash: Hex
   setTextTxHashes: Record<string, Hex>
+  fullName: string
 }> {
-  const { petName, petWalletAddress, peerId, blobCID, rpcUrl, signerKey } = args
+  const { petName, parentName, petWalletAddress, peerId, blobCID, rpcUrl, signerKey } = args
   const wallet = makeWalletClient(rpcUrl, signerKey)
   const publicClient = makePublicClient(rpcUrl)
   const account = wallet.account!
-  const node = petNamehashViaENS(petName)
 
-  // 1. Mint the subname (transfers ownership to deployer too — could refine to use pet wallet,
-  //    but deployer keeps mint authority for future updateText calls)
+  // Resolve parent. Default = tama.eth root. Otherwise nest under <parentName>.tama.eth
+  // (subname tree for breeding lineage).
+  const parentNode = parentName && parentName !== 'tama'
+    ? namehash(`${parentName}.tama.eth`) as Hex
+    : TAMA_ETH_NODE
+  const fullName = parentName && parentName !== 'tama'
+    ? `${petName}.${parentName}.tama.eth`
+    : `${petName}.tama.eth`
+  const node = namehash(fullName) as Hex
+
+  // 1. Mint the subname under the chosen parent. Caller must own the parent via
+  // NameWrapper. Deployer owns tama.eth and every pet subname it mints, so
+  // chaining works for breeding (deployer minted parent → can mint nested under it).
   const subnameTxHash = await wallet.writeContract({
     chain: sepolia,
     account,
@@ -170,7 +186,7 @@ export async function mintPetSubname(args: MintPetSubnameArgs): Promise<{
     abi: NameWrapperABI,
     functionName: 'setSubnodeRecord',
     args: [
-      TAMA_ETH_NODE,
+      parentNode,
       petName,
       account.address,
       ENS_PUBLIC_RESOLVER,
@@ -210,7 +226,7 @@ export async function mintPetSubname(args: MintPetSubnameArgs): Promise<{
     setTextTxHashes[key] = tx
   }
 
-  return { subnameNode: node, subnameTxHash, setAddrTxHash, setTextTxHashes }
+  return { subnameNode: node, subnameTxHash, setAddrTxHash, setTextTxHashes, fullName }
 }
 
 /// Reads the AXL peerId for a given pet name. Hub uses this to find the pet's

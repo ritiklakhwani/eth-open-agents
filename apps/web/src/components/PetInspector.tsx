@@ -8,6 +8,8 @@ interface PetInspectorProps {
   petId: number
   /// Polling interval in ms; null disables polling. Default 5s.
   pollIntervalMs?: number | null
+  /// Optional handler — when set, renders a "BREED" action button.
+  onBreed?: () => void
 }
 
 interface InspectorPayload {
@@ -35,7 +37,7 @@ const ARCHETYPE_BADGE: Record<Pet['archetype'], string> = {
 /// HUD inspector pinned top-right of /world. Shows pet name, ENS, stat bars,
 /// archetype badge, friend count, and a connection indicator (live = Hub
 /// online, demo = mock fallback).
-export function PetInspector({ petId, pollIntervalMs = 5000 }: PetInspectorProps) {
+export function PetInspector({ petId, pollIntervalMs = 5000, onBreed }: PetInspectorProps) {
   const [data, setData] = useState<InspectorPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(false)
@@ -119,6 +121,20 @@ export function PetInspector({ petId, pollIntervalMs = 5000 }: PetInspectorProps
       >
         {!collapsed && (
           <div className="flex flex-col gap-3">
+            {/* Sprite — shows the user-generated pixel-art pet */}
+            {pet.spriteUrl && !/\/sprites\/(sage|gremlin|athlete|joker|scholar)\.png$/.test(pet.spriteUrl) && (
+              <div className="flex justify-center">
+                <div className="border-4 border-[color:var(--color-bg-deep)] bg-[color:var(--color-bg-deep)] p-1">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={pet.spriteUrl}
+                    alt={`${pet.name} sprite`}
+                    className="w-20 h-20 [image-rendering:pixelated]"
+                  />
+                </div>
+              </div>
+            )}
+
             {/* ENS + archetype */}
             <div className="flex flex-col gap-1">
               <Row label="ENS" value={pet.ensName} valueColor="var(--color-cyan)" />
@@ -139,6 +155,16 @@ export function PetInspector({ petId, pollIntervalMs = 5000 }: PetInspectorProps
               <Row label="WALLET" value={short(pet.walletAddress)} valueColor="var(--color-ink-mid)" />
               <Row label="TOKEN" value={`#${pet.tokenId}`} valueColor="var(--color-ink-mid)" />
             </div>
+
+            {/* Action: breed */}
+            {onBreed && (
+              <button
+                onClick={onBreed}
+                className="cursor-pointer border-2 border-[color:var(--color-pink)] bg-[color:var(--color-bg-mid)] hover:bg-[color:var(--color-bg-hi)] py-1.5 font-[family-name:var(--font-pixel)] text-[10px] tracking-widest text-[color:var(--color-pink)]"
+              >
+                ✦ BREED
+              </button>
+            )}
 
             {/* Connection indicator */}
             <div

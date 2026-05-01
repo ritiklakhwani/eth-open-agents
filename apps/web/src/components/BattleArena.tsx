@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef } from 'react'
 import { PixelDialog, PixelButton, PixelCard } from './ui'
+import { useActivityEvents } from '@/hooks/useActivityEvents'
 
 interface BattleArenaProps {
   open: boolean
@@ -54,6 +55,40 @@ export function BattleArena({ open, onClose, petId }: BattleArenaProps) {
       stopPolling()
     }
   }, [open])
+
+  // Subscribe to live Hub activity. When the worker emits battle-result, we
+  // know the real fight finished — flip to "done" with the actual winner +
+  // settlement text, even if our deterministic stub timeline wasn't done yet.
+  const { events: activityEvents } = useActivityEvents(
+    open ? petId : null,
+    'battle-result',
+  )
+
+  useEffect(() => {
+    if (activityEvents.length === 0) return
+    const latest = activityEvents[activityEvents.length - 1]
+    if (latest.type !== 'battle-result' || !latest.battleId) return
+    if (!match || latest.battleId !== match.battleId) return
+    // Synthesize a "done" status from the real result
+    const youWon = latest.winner === petId
+    setStatus((prev) => ({
+      battleId: latest.battleId!,
+      elapsedMs: prev?.elapsedMs ?? 0,
+      events: prev?.events ?? [],
+      current: {
+        at: 0,
+        phase: 'verdict',
+        detail: latest.text ?? `Pet ${latest.winner} wins!`,
+        petWon: youWon,
+      },
+      finished: true,
+      judgeVotes: prev?.judgeVotes ?? [],
+      payoutTxHash: prev?.payoutTxHash ?? null,
+    }))
+    setView('done')
+    stopPolling()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activityEvents, match])
 
   function stopPolling() {
     if (pollRef.current) {

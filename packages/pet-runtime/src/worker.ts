@@ -75,12 +75,32 @@ async function main() {
       const withPetId  = m.withPetId  as number
       const withPeerId = m.withPeerId as string
       const withName   = m.withName   as string
+
+      // Try Brain first; if Anthropic is rate-limited or unreachable, fall back
+      // to a canned opener so chat ALWAYS lands visually. Park social demo
+      // shouldn't blank out just because Haiku is overloaded.
+      let opener: string
       try {
-        const opener = await brain.meetingOpener(withName)
+        opener = await brain.meetingOpener(withName)
+      } catch (err) {
+        opener = pickCannedOpener(withName)
+        console.warn(`[Pet ${PET_ID}] brain failed, using canned opener: ${(err as Error).message.slice(0, 60)}`)
+      }
+
+      try {
+        // axl.send falls back to Hub-relay automatically on AXL TCP failure
         await axl.send(withPeerId, { type: 'chat', text: opener, fromPetId: PET_ID })
         memory.add({ kind: 'chat', content: { text: opener, to: withName }, counterpartyPetId: withPetId })
-        memory.strengthenFriendship(withPetId)
+        const friendship = memory.strengthenFriendship(withPetId)
         process.send?.({ type: 'chat-out', petId: PET_ID, toPetId: withPetId, text: opener })
+        if (friendship.crossedThreshold) {
+          process.send?.({
+            type: 'friendship-milestone',
+            petId: PET_ID,
+            otherPetId: withPetId,
+            strength: friendship.strength,
+          })
+        }
       } catch (err) {
         console.error(`[Pet ${PET_ID}] chat-request error:`, (err as Error).message)
       }
@@ -139,62 +159,92 @@ async function main() {
         console.error(`[Pet ${PET_ID}] battle error:`, err.message)
         process.send?.({ type: 'battle-result', petId: PET_ID, battleId: m.battleId, winner: -1, text: err.message })
       })
+
+    } else if (m.type === 'relayed-axl-msg') {
+      // Hub-relay fallback: another pet's worker tried axl.send, that failed,
+      // Hub forwarded the payload here. Dispatch identically to AXL recv.
+      const fromPeerId = m.fromPeerId as string
+      const payload    = m.payload as Record<string, unknown>
+      try {
+        await dispatchPeerMessage(fromPeerId, payload)
+      } catch (err) {
+        console.error(`[Pet ${PET_ID}] relayed dispatch error:`, (err as Error).message)
+      }
     }
   })
 
   // ── 8. Main event loop ───────────────────────────────────────────────────
+
+  // Single dispatcher used by AXL recv loop AND Hub-relay fallback.
+  async function dispatchPeerMessage(fromPeerId: string, msg: Record<string, unknown>) {
+    if (msg.type === 'chat') {
+      const text     = msg.text as string
+      const fromId   = msg.fromPetId as number
+
+      // Brain reply with canned-fallback so we never silently drop a turn
+      let reply: string
+      try {
+        reply = await brain.chat({ text, fromPetId: fromId })
+      } catch (err) {
+        const otherName = `pet-${fromId}`
+        reply = pickCannedReply(otherName)
+        console.warn(`[Pet ${PET_ID}] reply brain failed, canned: ${(err as Error).message.slice(0, 60)}`)
+      }
+
+      memory.add({ kind: 'chat', content: { text, from: fromPeerId }, counterpartyPetId: fromId })
+      const friendship = memory.strengthenFriendship(fromId)
+      await axl.send(fromPeerId, { type: 'chat', text: reply, fromPetId: PET_ID })
+      process.send?.({ type: 'chat-out', petId: PET_ID, toPetId: fromId, text: reply })
+      if (friendship.crossedThreshold) {
+        process.send?.({
+          type: 'friendship-milestone',
+          petId: PET_ID,
+          otherPetId: fromId,
+          strength: friendship.strength,
+        })
+      }
+
+    } else if (msg.type === 'park-hello') {
+      console.log(`[Pet ${PET_ID}] Park hello from ${msg.fromName}`)
+      memory.add({ kind: 'event', content: { event: 'park-hello', from: msg.fromName } })
+
+    } else if (msg.type === 'gift') {
+      console.log(`[Pet ${PET_ID}] Gift received from ${msg.fromPetId}: ${JSON.stringify(msg.payload)}`)
+      memory.add({ kind: 'event', content: { event: 'gift', payload: msg.payload }, counterpartyPetId: msg.fromPetId as number })
+
+    } else if (msg.type === 'battle-invite') {
+      handleBattleInvite(axl, fromPeerId, { battleId: msg.battleId as string, fromPetId: msg.fromPetId as number }, PET_ID)
+        .catch((err: Error) => console.error(`[Pet ${PET_ID}] battle-invite error:`, err.message))
+
+    } else if (msg.type === 'battle-debate') {
+      const bId = msg.battleId as string
+      if (activeBattleIds.has(bId)) {
+        battleBus.emit(`${bId}:battle-debate-${msg.round}`, msg)
+      } else {
+        handleBattleDebate(
+          axl, brain, memory, fromPeerId,
+          msg as { battleId: string; round: number; text: string; fromPetId: number },
+          PET_ID,
+        ).catch((err: Error) => console.error(`[Pet ${PET_ID}] battle-debate error:`, err.message))
+      }
+
+    } else if (msg.type === 'battle-judge') {
+      handleBattleJudge(
+        axl, brain, fromPeerId,
+        msg as { battleId: string; transcript: unknown[]; pet1Id: number; pet2Id: number },
+      ).catch((err: Error) => console.error(`[Pet ${PET_ID}] battle-judge error:`, err.message))
+
+    } else if (msg.type === 'battle-accept' || msg.type === 'battle-vote') {
+      battleBus.emit(`${msg.battleId as string}:${msg.type}`, msg)
+    }
+  }
 
   // Poll AXL /recv every 5s
   const pollRecv = setInterval(async () => {
     try {
       const incoming = await axl.recv()
       if (!incoming) return
-      const msg = incoming.message as Record<string, unknown>
-
-      if (msg.type === 'chat') {
-        const text     = msg.text as string
-        const fromId   = msg.fromPetId as number
-        const reply    = await brain.chat({ text, fromPetId: fromId })
-        memory.add({ kind: 'chat', content: { text, from: incoming.from }, counterpartyPetId: fromId })
-        memory.strengthenFriendship(fromId)
-        await axl.send(incoming.from, { type: 'chat', text: reply, fromPetId: PET_ID })
-        process.send?.({ type: 'chat-out', petId: PET_ID, toPetId: fromId, text: reply })
-
-      } else if (msg.type === 'park-hello') {
-        console.log(`[Pet ${PET_ID}] Park hello from ${msg.fromName}`)
-        memory.add({ kind: 'event', content: { event: 'park-hello', from: msg.fromName } })
-
-      } else if (msg.type === 'gift') {
-        console.log(`[Pet ${PET_ID}] Gift received from ${msg.fromPetId}: ${JSON.stringify(msg.payload)}`)
-        memory.add({ kind: 'event', content: { event: 'gift', payload: msg.payload }, counterpartyPetId: msg.fromPetId as number })
-
-      } else if (msg.type === 'battle-invite') {
-        handleBattleInvite(axl, incoming.from, { battleId: msg.battleId as string, fromPetId: msg.fromPetId as number }, PET_ID)
-          .catch((err: Error) => console.error(`[Pet ${PET_ID}] battle-invite error:`, err.message))
-
-      } else if (msg.type === 'battle-debate') {
-        const bId = msg.battleId as string
-        if (activeBattleIds.has(bId)) {
-          // We're driving this battle — route opponent's response to battleBus
-          battleBus.emit(`${bId}:battle-debate-${msg.round}`, msg)
-        } else {
-          // We're the passive participant — generate and send a rebuttal
-          handleBattleDebate(
-            axl, brain, memory, incoming.from,
-            msg as { battleId: string; round: number; text: string; fromPetId: number },
-            PET_ID,
-          ).catch((err: Error) => console.error(`[Pet ${PET_ID}] battle-debate error:`, err.message))
-        }
-
-      } else if (msg.type === 'battle-judge') {
-        handleBattleJudge(
-          axl, brain, incoming.from,
-          msg as { battleId: string; transcript: unknown[]; pet1Id: number; pet2Id: number },
-        ).catch((err: Error) => console.error(`[Pet ${PET_ID}] battle-judge error:`, err.message))
-
-      } else if (msg.type === 'battle-accept' || msg.type === 'battle-vote') {
-        battleBus.emit(`${msg.battleId as string}:${msg.type}`, msg)
-      }
+      await dispatchPeerMessage(incoming.from, incoming.message as Record<string, unknown>)
     } catch (err) {
       console.error(`[Pet ${PET_ID}] recv error:`, (err as Error).message)
     }
@@ -236,6 +286,46 @@ async function main() {
   process.on('SIGINT',  shutdown)
 
   console.log(`[Pet ${PET_ID}] Live in Park — event loop running`)
+}
+
+// Canned chat openers + replies — used when Brain (Anthropic) is rate-limited
+// or down. Keeps the Park social demo visually alive even on free Haiku tier.
+const CANNED_OPENERS: ReadonlyArray<(name: string) => string> = [
+  (n) => `Hey ${n}! What brings you here?`,
+  (n) => `${n}, you got a sec?`,
+  (n) => `Watch this — bet I can lap you, ${n}.`,
+  (n) => `Did you hear about the upgrade? ${n}, you'll love it.`,
+  (n) => `${n}! Long time. How's the energy stat?`,
+  (n) => `Park's quiet today. Nice to bump into you, ${n}.`,
+  (n) => `Hey ${n} — wanna swap memories?`,
+  (n) => `I was just thinking about you, ${n}.`,
+  (n) => `${n}, you doing okay? Stats look low.`,
+  (n) => `Ever wonder what's behind the mailbox zone, ${n}?`,
+  (n) => `${n}, watch where you wander. Big things coming.`,
+  (n) => `Hi hi ${n}! Pixel five.`,
+]
+
+const CANNED_REPLIES: ReadonlyArray<(name: string) => string> = [
+  (n) => `Same here ${n}, just enjoying the breeze.`,
+  (n) => `Ha! Yeah, the park's good today.`,
+  (n) => `Tell me about it. Love bumping into you, ${n}.`,
+  (n) => `Nice to meet you ${n}! Wanna hang out more?`,
+  (n) => `Happy to see you, ${n}. Catch up soon?`,
+  (n) => `Word up ${n}! I'm doing fine. You?`,
+  (n) => `Glad we met ${n}. Friend request incoming.`,
+  (n) => `Always good to chat, ${n}.`,
+  (n) => `You bet ${n} — let's wander together.`,
+  (n) => `Right back at ya, ${n}!`,
+]
+
+function pickCannedOpener(otherName: string): string {
+  const fn = CANNED_OPENERS[Math.floor(Math.random() * CANNED_OPENERS.length)]
+  return fn(otherName)
+}
+
+function pickCannedReply(otherName: string): string {
+  const fn = CANNED_REPLIES[Math.floor(Math.random() * CANNED_REPLIES.length)]
+  return fn(otherName)
 }
 
 main().catch((err) => {

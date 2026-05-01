@@ -119,12 +119,19 @@ export class PetSupervisor {
     worker.on('message', (msg: unknown) => {
       const m = msg as Record<string, unknown>
       if (m.type === 'peer-ready') {
-        // Worker booted and has its AXL peerId — update DB, then ENS (Phase 3)
+        // Worker booted and has its AXL peerId — update DB, then mint ENS subname
         this.db.prepare('UPDATE pets SET peer_id = ? WHERE token_id = ?')
           .run(m.peerId, m.petId)
         console.log(`[Supervisor] Pet ${m.petId} peer-ready: ${m.peerId}`)
-        // TODO Phase 3: call ens.mintPetSubname(m.ensName, m.peerId) once Ritik ships ens package
+
+        // Phase 3 ENS: mint <name>.tama.eth on Sepolia (best-effort, idempotent).
+        // Fire-and-forget — pet shouldn't block on ENS confirms.
+        this.mintEnsSubnameForPet(m.petId as number)
+          .catch(err => console.warn(`[Pet ${m.petId}] ENS mint skipped:`, err.message))
+
       } else if (m.type === 'chat-out') {
+        const text = String(m.text ?? '').slice(0, 80)
+        console.log(`[Chat] Pet ${m.petId} → Pet ${m.toPetId}: "${text}"`)
         this.io?.to('world').emit('chat', {
           from: m.petId, to: m.toPetId, text: m.text, timestamp: Date.now(),
         })
@@ -154,6 +161,50 @@ export class PetSupervisor {
         this.io?.to('world').emit('activity', {
           type: 'battle-result', petId: m.petId, battleId: m.battleId, winner: m.winner, text: m.text, timestamp: Date.now(),
         })
+        // A3: write battle belt to winner ENS
+        const winnerId = m.winner as number
+        if (winnerId && winnerId > 0) {
+          const winnerRow = this.db.prepare('SELECT name FROM pets WHERE token_id = ?').get(winnerId) as
+            | { name: string }
+            | undefined
+          if (winnerRow) this.incrementBeltCount(winnerRow.name, 'debate').catch(() => {})
+        }
+
+      } else if (m.type === 'friendship-milestone') {
+        // ENS Most Creative: pets vouch for each other on-chain when
+        // friendship strength crosses a threshold (chat exchanges accumulate).
+        // Writes tama.vouches.<friend> text record on the friend's ENS — a
+        // verifiable credential issued by one autonomous agent to another.
+        const otherPetId = m.otherPetId as number
+        const strength   = m.strength as number
+        const otherRow = this.db.prepare('SELECT name FROM pets WHERE token_id = ?')
+          .get(otherPetId) as { name: string } | undefined
+        const fromName = (msg as { name?: string }).name ?? null
+        const fromRow = this.db.prepare('SELECT name FROM pets WHERE token_id = ?')
+          .get(tokenId) as { name: string } | undefined
+        if (otherRow && fromRow) {
+          this.issueAttestationForFriendship(fromRow.name, otherRow.name, strength)
+            .catch((err) => console.warn(`[ENS] attestation failed: ${err.message}`))
+        }
+
+      } else if (m.type === 'relay-axl-msg') {
+        // Hub-as-AXL-relay fallback: when worker's direct axl.send fails (gVisor
+        // routing unreachable), it IPC-asks Hub to forward. We resolve the
+        // recipient's tokenId by peer_id from the DB and broadcast to that
+        // worker via existing child_process.fork channel. End result: the
+        // recipient worker sees the message in its handleIncoming path,
+        // identical to receiving it via real AXL recv.
+        const toPeerId = m.toPeerId as string
+        const row = this.db.prepare(
+          'SELECT token_id FROM pets WHERE peer_id = ? LIMIT 1'
+        ).get(toPeerId) as { token_id: number } | undefined
+        if (row) {
+          this.broadcast(row.token_id, {
+            type: 'relayed-axl-msg',
+            fromPeerId: this.peerIdFor(tokenId),
+            payload: m.msg,
+          })
+        }
 
       } else {
         console.log(`[Pet ${tokenId}]`, msg)
@@ -227,6 +278,159 @@ export class PetSupervisor {
 
   broadcast(petId: number, msg: Record<string, unknown>) {
     this.workers.get(petId)?.send(msg)
+  }
+
+  private peerIdFor(petId: number): string | null {
+    const row = this.db.prepare('SELECT peer_id FROM pets WHERE token_id = ?').get(petId) as
+      | { peer_id: string | null }
+      | undefined
+    return row?.peer_id ?? null
+  }
+
+  // ── A2: ENS subname mint (Phase 3) ────────────────────────────────────────
+  // Calls packages/ens.mintPetSubname for the given pet — registers
+  // <name>.tama.eth on Sepolia, sets addr() to the pet wallet, writes
+  // tama.peerId + tama.blob text records. Idempotent: if the subname's
+  // addr() is already correct we skip the writes.
+  private async mintEnsSubnameForPet(petId: number) {
+    const rpcUrl    = process.env.SEPOLIA_RPC_URL
+    const signerKey = process.env.DEPLOYER_PRIVATE_KEY as `0x${string}` | undefined
+    if (!rpcUrl || !signerKey) {
+      console.warn(`[Pet ${petId}] ENS skipped: SEPOLIA_RPC_URL or DEPLOYER_PRIVATE_KEY not set`)
+      return
+    }
+
+    const row = this.db.prepare(
+      'SELECT name, wallet_address, peer_id, blob_cid, parent_name FROM pets WHERE token_id = ?'
+    ).get(petId) as {
+      name: string
+      wallet_address: string
+      peer_id: string
+      blob_cid: string | null
+      parent_name: string | null
+    } | undefined
+    if (!row || !row.peer_id) return
+
+    // ENS Most Creative: if BreedingFlow set parent_name, mint as
+    // <child>.<parent>.tama.eth (subname tree). Otherwise flat <name>.tama.eth.
+    const parentName = row.parent_name ?? undefined
+    const expectedFullName = parentName
+      ? `${row.name}.${parentName}.tama.eth`
+      : `${row.name}.tama.eth`
+
+    // Check existing addr() — if already minted at the expected name, skip
+    const ens = await import('ens')
+    try {
+      const existing = parentName
+        ? await ens.readTextRecord(expectedFullName.replace(/\.tama\.eth$/, ''), 'addr', rpcUrl).catch(() => '')
+        : await ens.readPetAddrFromENS(row.name, rpcUrl)
+      if (existing && existing.toLowerCase() === row.wallet_address.toLowerCase()) {
+        console.log(`[Pet ${petId}] ENS subname ${expectedFullName} already minted — skipping`)
+        await ens.heartbeatLastSeen(row.name, rpcUrl, signerKey).catch(() => {})
+        return
+      }
+    } catch {
+      // not minted yet — proceed
+    }
+
+    const result = await ens.mintPetSubname({
+      petName:          row.name,
+      parentName,                                              // ← nested if breeding
+      petWalletAddress: row.wallet_address as `0x${string}`,
+      peerId:           row.peer_id,
+      blobCID:          row.blob_cid ?? '',
+      rpcUrl,
+      signerKey,
+    })
+    console.log(
+      `[Pet ${petId}] ENS minted: ${result.fullName} — subname tx ${result.subnameTxHash.slice(0, 10)}…`
+    )
+
+    // Bump lastSeenBlock right after mint so the KeeperHub mailbox HERO
+    // workflow can fire if anyone has a pending gift to this pet.
+    await ens.heartbeatLastSeen(row.name, rpcUrl, signerKey).catch(() => {})
+  }
+
+  // ── A3: ENS heartbeat tick — bump lastSeenBlock for all alive pets every
+  // 10 minutes. The KeeperHub conditional mailbox workflow polls this record;
+  // updating it makes the conditional fire organically when a recipient is
+  // "online enough" instead of needing manual Trigger-Now button.
+  startEnsHeartbeat() {
+    const rpcUrl    = process.env.SEPOLIA_RPC_URL
+    const signerKey = process.env.DEPLOYER_PRIVATE_KEY as `0x${string}` | undefined
+    if (!rpcUrl || !signerKey) return
+
+    const tick = async () => {
+      const ens = await import('ens')
+      const pets = this.db.prepare(
+        "SELECT name FROM pets WHERE peer_id IS NOT NULL AND peer_id != ''"
+      ).all() as Array<{ name: string }>
+      // Stagger writes to avoid flooding the RPC
+      for (const { name } of pets) {
+        try {
+          await ens.heartbeatLastSeen(name, rpcUrl, signerKey)
+          await new Promise((r) => setTimeout(r, 1500))
+        } catch (err) {
+          // Silent — ENS heartbeat is best-effort, don't spam logs
+          void err
+        }
+      }
+      console.log(`[ENS] Heartbeat sent for ${pets.length} pet(s)`)
+    }
+
+    // Initial bump 30s after boot, then every 10 min
+    setTimeout(() => { void tick() }, 30_000)
+    setInterval(tick, 10 * 60_000)
+  }
+
+  // ── A3 helper: bump a single pet's lastSeenBlock now (used after battle
+  // wins or any other "I'm here" event).
+  async bumpLastSeen(petName: string) {
+    const rpcUrl    = process.env.SEPOLIA_RPC_URL
+    const signerKey = process.env.DEPLOYER_PRIVATE_KEY as `0x${string}` | undefined
+    if (!rpcUrl || !signerKey) return
+    try {
+      const ens = await import('ens')
+      await ens.heartbeatLastSeen(petName, rpcUrl, signerKey)
+    } catch (err) {
+      console.warn(`[ENS] bumpLastSeen(${petName}) failed: ${(err as Error).message}`)
+    }
+  }
+
+  // ── ENS Most Creative: friendship attestation ──────────────────────────────
+  // When pet A's friendship with B crosses a threshold, A writes a verifiable
+  // credential about B onto B's ENS profile (text record `tama.vouches.<A>`).
+  // Anyone can read pet B's full reputation — who's vouched for them, how
+  // strongly — directly from on-chain state, no server required.
+  async issueAttestationForFriendship(fromName: string, toName: string, strength: number) {
+    const rpcUrl    = process.env.SEPOLIA_RPC_URL
+    const signerKey = process.env.DEPLOYER_PRIVATE_KEY as `0x${string}` | undefined
+    if (!rpcUrl || !signerKey) return
+    try {
+      const ens = await import('ens')
+      const claim = `Friend since strength ${strength}. Vouched by ${fromName}.`
+      await ens.issueAttestation(fromName, toName, claim, rpcUrl, signerKey)
+      console.log(`[ENS] Attestation: ${fromName} → ${toName}.tama.eth (strength ${strength})`)
+    } catch (err) {
+      console.warn(`[ENS] issueAttestation failed: ${(err as Error).message}`)
+    }
+  }
+
+  // ── A3: increment battle-belt count on winner ENS ──────────────────────────
+  async incrementBeltCount(winnerName: string, format: string) {
+    const rpcUrl    = process.env.SEPOLIA_RPC_URL
+    const signerKey = process.env.DEPLOYER_PRIVATE_KEY as `0x${string}` | undefined
+    if (!rpcUrl || !signerKey) return
+    try {
+      const ens = await import('ens')
+      const key = `tama.belts.${format}`
+      const current = await ens.readTextRecord(winnerName, key, rpcUrl).catch(() => '0')
+      const next    = (parseInt(current || '0', 10) + 1).toString()
+      await ens.setTextRecord(winnerName, key, next, rpcUrl, signerKey)
+      console.log(`[ENS] ${winnerName}.tama.eth ${key} → ${next}`)
+    } catch (err) {
+      console.warn(`[ENS] incrementBeltCount failed: ${(err as Error).message}`)
+    }
   }
 
   killAll() {

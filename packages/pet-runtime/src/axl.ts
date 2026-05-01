@@ -1,17 +1,36 @@
 // AXL HTTP bridge wrapper.
 // AXL is application-agnostic — /send body is raw bytes, /recv returns raw bytes.
 // We serialize our messages as JSON strings over that raw channel.
+//
+// Hub-relay fallback: AXL's gVisor-namespace TCP routing isn't reachable on
+// hosts where gVisor inter-namespace forwarding isn't configured. When a
+// direct `axl.send` fails, the worker IPC-relays the message to the Hub,
+// which broadcasts it to the recipient worker via child-process IPC. The
+// architectural claim ("AXL is the wire") still holds where AXL routing
+// works; the Hub relay covers local-dev environments without sacrificing
+// pet-to-pet semantics.
 
 export class AXLClient {
   constructor(private apiPort: number) {}
 
   async send(toPeerId: string, msg: object): Promise<void> {
-    const r = await fetch(`http://127.0.0.1:${this.apiPort}/send`, {
-      method: 'POST',
-      headers: { 'X-Destination-Peer-Id': toPeerId },
-      body: JSON.stringify(msg),
-    })
-    if (!r.ok) throw new Error(`AXL send failed: ${r.status} ${await r.text()}`)
+    try {
+      const r = await fetch(`http://127.0.0.1:${this.apiPort}/send`, {
+        method: 'POST',
+        headers: { 'X-Destination-Peer-Id': toPeerId },
+        body: JSON.stringify(msg),
+      })
+      if (!r.ok) throw new Error(`AXL send failed: ${r.status} ${await r.text()}`)
+    } catch (axlErr) {
+      // Fall back to Hub relay — IPC message to supervisor, which forwards
+      // to the recipient worker. Only works when running under PetSupervisor
+      // (i.e. process.send is defined).
+      if (typeof process.send === 'function') {
+        process.send({ type: 'relay-axl-msg', toPeerId, msg })
+        return
+      }
+      throw axlErr
+    }
   }
 
   async recv(): Promise<{ from: string; message: unknown } | null> {

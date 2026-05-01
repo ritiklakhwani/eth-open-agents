@@ -22,6 +22,8 @@ export function initDB(): BetterDB {
       peer_id       TEXT,
       blob_cid      TEXT,
       archetype     TEXT,
+      sprite_url    TEXT,
+      parent_name   TEXT,
       mood          INTEGER DEFAULT 80,
       energy        INTEGER DEFAULT 100,
       hunger        INTEGER DEFAULT 50,
@@ -58,6 +60,12 @@ export function initDB(): BetterDB {
       created_at INTEGER NOT NULL
     );
   `)
+
+  // Migrations for older DBs: add columns added after the initial schema.
+  // SQLite ignores ALTER TABLE ADD COLUMN if the column already exists in
+  // newer SQLite, but we wrap in try/catch for safety.
+  try { db.exec(`ALTER TABLE pets ADD COLUMN sprite_url TEXT`) } catch {}
+  try { db.exec(`ALTER TABLE pets ADD COLUMN parent_name TEXT`) } catch {}
 
   return db
 }

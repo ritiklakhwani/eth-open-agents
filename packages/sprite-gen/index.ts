@@ -1,66 +1,132 @@
-// sprite-gen — Gemini 2.5 Flash Image (nano-banana) wrapper.
+// sprite-gen — OpenAI gpt-image-1 image-to-image with Pollinations fallback.
 //
-// Three input modalities:
-//   * generateFromImage(buffer, mimeType, archetype?)  — image-to-image (camera or upload)
-//   * generateFromPrompt(prompt, archetype?)            — text-to-image
+// Primary: OpenAI's gpt-image-1 model. For uploaded photos it preserves the
+// subject's distinctive features (face shape, hair color) while transforming
+// to 16-bit pixel art. This is the demo opener for the 0G iNFT track:
+// "judge uploads face → recognizable pet appears in 5 seconds."
 //
-// Both return raw PNG bytes (as Buffer). Caller is responsible for
-// persistence (e.g. apps/web saves to public/sprites/<hash>.png and serves a URL).
+// Fallback: Pollinations text-to-image (free, no auth). Used when:
+//   - OPENAI_API_KEY missing or revoked
+//   - OpenAI 429 / billing issue / quota
+//   - Moderation rejects the input image
+// Pollinations doesn't accept an image input on free tier so the uploaded
+// photo is ignored — UI still shows a creature, just not face-derived.
 //
-// Output is post-processed with sharp: nearest-neighbor downsample to 64x64,
-// then upsample to 256x256 — enforces a hard pixel grid so the sprite reads
-// as 8/16-bit even when Gemini draws "pixel-ish" instead of true pixel art.
+// Output post-processing: nearest-neighbor downsample to 64x64 then upsample
+// to 256x256. Enforces a hard pixel grid even when the model draws "pixel-ish"
+// instead of true pixel art.
 
-import { GoogleGenAI } from '@google/genai'
 import sharp from 'sharp'
+import OpenAI from 'openai'
+import { toFile } from 'openai/uploads'
 
-const MODEL = 'gemini-2.5-flash-image'
+// ── Pollinations (fallback) ──────────────────────────────────────────────────
 
-const STYLE_PROMPT =
-  'Transform the input into a cute 16-bit pixel art creature sprite, ' +
-  'chibi style, vivid saturated colors, sharp pixel edges, transparent background, ' +
-  'centered, full body, facing the viewer. Match the subject\'s features ' +
-  '(face shape, hair color, distinctive traits) so the sprite is recognizable.'
+const POLLINATIONS_URL = 'https://image.pollinations.ai/prompt'
+const POLLINATIONS_MODEL = 'flux'
 
-const PROMPT_STYLE_SUFFIX =
-  ' — rendered as a 16-bit pixel art creature sprite, chibi style, vivid saturated ' +
+const STYLE_SUFFIX =
+  ' rendered as a 16-bit pixel art creature sprite, chibi style, vivid saturated ' +
+  'colors, sharp pixel edges, transparent background, centered, facing viewer'
+
+// ── OpenAI primary ───────────────────────────────────────────────────────────
+
+const OPENAI_MODEL = 'gpt-image-1'
+const OPENAI_QUALITY: 'low' | 'medium' | 'high' = 'low'  // ~$0.011/image
+
+const OPENAI_IMAGE_PROMPT =
+  'Transform the input into a cute 16-bit pixel art creature sprite, chibi style, ' +
+  'vivid saturated colors, sharp pixel edges, transparent background, centered, ' +
+  "full body, facing the viewer. Match the subject's distinctive features (face shape, " +
+  'hair color, ears, accessories) so the sprite is recognizable as them.'
+
+const OPENAI_PROMPT_SUFFIX =
+  ' rendered as a 16-bit pixel art creature sprite, chibi style, vivid saturated ' +
   'colors, sharp pixel edges, transparent background, centered, facing viewer.'
+
+const ARCHETYPE_HINTS: Record<string, string> = {
+  sage:    'a calm wise pet creature with mystic blue and cyan accents,',
+  gremlin: 'a mischievous pet creature with magenta and pink accents,',
+  athlete: 'a strong energetic pet creature with lime green accents,',
+  joker:   'a playful silly pet creature with yellow accents and a goofy grin,',
+  scholar: 'a curious studious pet creature with purple accents and round glasses,',
+}
 
 function archetypeHint(archetype?: string): string {
   if (!archetype) return ''
-  const map: Record<string, string> = {
-    sage:    ' The creature looks calm, wise, with mystic blue/cyan accents.',
-    gremlin: ' The creature looks mischievous, with magenta/pink accents.',
-    athlete: ' The creature looks strong and energetic, with lime green accents.',
-    joker:   ' The creature looks playful and silly, with yellow accents.',
-    scholar: ' The creature looks studious and curious, with purple accents.',
+  return ' ' + (ARCHETYPE_HINTS[archetype] ?? '')
+}
+
+function buildPollinationsPrompt(userPrompt: string | null, archetype?: string): string {
+  const arch = archetype ? ARCHETYPE_HINTS[archetype] ?? '' : ''
+  const seed = userPrompt && userPrompt.trim().length > 0
+    ? userPrompt.trim()
+    : (arch || 'a cute pet creature')
+  return [arch, seed, STYLE_SUFFIX].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
+}
+
+function getOpenAI(): OpenAI | null {
+  const apiKey = process.env.OPENAI_API_KEY
+  if (!apiKey) return null
+  return new OpenAI({ apiKey })
+}
+
+async function openAIImageToImage(buffer: Buffer, mimeType: string, archetype?: string): Promise<Buffer> {
+  const client = getOpenAI()
+  if (!client) throw new Error('OPENAI_API_KEY not set')
+
+  const ext = mimeType === 'image/png' ? 'png' : 'jpg'
+  const file = await toFile(buffer, `photo.${ext}`, { type: mimeType })
+
+  const resp = await client.images.edit({
+    model:   OPENAI_MODEL,
+    image:   file,
+    prompt:  OPENAI_IMAGE_PROMPT + archetypeHint(archetype),
+    size:    '1024x1024',
+    quality: OPENAI_QUALITY,
+    n:       1,
+  })
+
+  const b64 = resp.data?.[0]?.b64_json
+  if (!b64) throw new Error('OpenAI returned no image')
+  return Buffer.from(b64, 'base64')
+}
+
+async function openAITextToImage(userPrompt: string, archetype?: string): Promise<Buffer> {
+  const client = getOpenAI()
+  if (!client) throw new Error('OPENAI_API_KEY not set')
+
+  const prompt = userPrompt.trim() + OPENAI_PROMPT_SUFFIX + archetypeHint(archetype)
+
+  const resp = await client.images.generate({
+    model:   OPENAI_MODEL,
+    prompt,
+    size:    '1024x1024',
+    quality: OPENAI_QUALITY,
+    n:       1,
+  })
+
+  const b64 = resp.data?.[0]?.b64_json
+  if (!b64) throw new Error('OpenAI returned no image')
+  return Buffer.from(b64, 'base64')
+}
+
+async function fetchPollinations(prompt: string): Promise<Buffer> {
+  const params = new URLSearchParams({
+    model: POLLINATIONS_MODEL,
+    width: '512',
+    height: '512',
+    nologo: 'true',
+    enhance: 'true',
+  })
+  const url = `${POLLINATIONS_URL}/${encodeURIComponent(prompt)}?${params.toString()}`
+  const res = await fetch(url, { signal: AbortSignal.timeout(60_000) })
+  if (!res.ok) {
+    throw new Error(`Pollinations returned ${res.status}`)
   }
-  return map[archetype] ?? ''
+  return Buffer.from(await res.arrayBuffer())
 }
 
-function getClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) throw new Error('GEMINI_API_KEY not set')
-  return new GoogleGenAI({ apiKey })
-}
-
-/// Extract the first inline image from a Gemini generateContent response.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractInlineImage(response: any): Buffer {
-  const candidates = response?.candidates ?? []
-  for (const cand of candidates) {
-    const parts = cand?.content?.parts ?? []
-    for (const part of parts) {
-      if (part?.inlineData?.data) {
-        return Buffer.from(part.inlineData.data, 'base64')
-      }
-    }
-  }
-  throw new Error('Gemini response contained no image data')
-}
-
-/// Pixel-grid post-processing: downsample to 64x64 with nearest-neighbor,
-/// then upsample to 256x256 (also nearest-neighbor) so the result is hard pixels.
 async function pixelize(pngBytes: Buffer): Promise<Buffer> {
   return sharp(pngBytes)
     .resize(64, 64, {
@@ -74,60 +140,56 @@ async function pixelize(pngBytes: Buffer): Promise<Buffer> {
 }
 
 export interface SpriteResult {
-  /// Raw PNG bytes after pixel-grid post-processing. Caller persists.
   pngBytes: Buffer
-  /// Source modality, for logging / analytics.
+  /// 'image' for image-to-image, 'prompt' for text-to-image. Provider info
+  /// (openai vs pollinations) is logged but not exposed in the type to keep
+  /// the API stable for callers.
   source: 'image' | 'prompt'
 }
 
-/// Image-to-image: takes a user photo (camera frame or upload), returns
-/// a recognizable pixel-art creature sprite.
+/// Image-to-image: tries OpenAI gpt-image-1 first (preserves face features),
+/// falls back to Pollinations text-to-image when OpenAI fails.
 export async function generateFromImage(
   buffer: Buffer,
   mimeType: string,
   archetype?: string,
 ): Promise<SpriteResult> {
-  const client = getClient()
-  const prompt = STYLE_PROMPT + archetypeHint(archetype)
-
-  const response = await client.models.generateContent({
-    model: MODEL,
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { text: prompt },
-          { inlineData: { data: buffer.toString('base64'), mimeType } },
-        ],
-      },
-    ],
-  })
-
-  const raw = extractInlineImage(response)
+  let raw: Buffer
+  try {
+    raw = await openAIImageToImage(buffer, mimeType, archetype)
+    console.log('[sprite-gen] OpenAI image-to-image OK')
+  } catch (err) {
+    console.warn(
+      `[sprite-gen] OpenAI failed (${(err as Error).message.slice(0, 80)}) — falling back to Pollinations`,
+    )
+    const prompt = buildPollinationsPrompt(null, archetype)
+    raw = await fetchPollinations(prompt)
+  }
   const pngBytes = await pixelize(raw)
   return { pngBytes, source: 'image' }
 }
 
-/// Text-to-image: takes a freeform prompt, returns a pixel-art creature sprite.
+/// Text-to-image: tries OpenAI first, falls back to Pollinations.
 export async function generateFromPrompt(
   userPrompt: string,
   archetype?: string,
 ): Promise<SpriteResult> {
-  const client = getClient()
-  const prompt = userPrompt.trim() + PROMPT_STYLE_SUFFIX + archetypeHint(archetype)
-
-  const response = await client.models.generateContent({
-    model: MODEL,
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-  })
-
-  const raw = extractInlineImage(response)
+  let raw: Buffer
+  try {
+    raw = await openAITextToImage(userPrompt, archetype)
+    console.log('[sprite-gen] OpenAI text-to-image OK')
+  } catch (err) {
+    console.warn(
+      `[sprite-gen] OpenAI failed (${(err as Error).message.slice(0, 80)}) — falling back to Pollinations`,
+    )
+    const prompt = buildPollinationsPrompt(userPrompt, archetype)
+    raw = await fetchPollinations(prompt)
+  }
   const pngBytes = await pixelize(raw)
   return { pngBytes, source: 'prompt' }
 }
 
 /// Back-compat shim. Older callers used pixelatePhoto and expected a hosted URL.
-/// We now return a data: URL so the shape { spriteUrl } stays the same.
 export async function pixelatePhoto(
   buffer: Buffer,
   mimeType: string,

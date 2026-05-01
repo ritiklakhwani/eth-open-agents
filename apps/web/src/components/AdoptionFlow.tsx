@@ -270,6 +270,32 @@ export function AdoptionFlow({ open, onClose, ownerAddress }: AdoptionFlowProps)
       }
       const result = (await mintRes.json()) as MintResult
       setMintResult(result)
+
+      // Persist the OpenAI-generated sprite URL to the Hub so the world page
+      // and pet inspector can render it (otherwise the user sees the default
+      // archetype rectangle instead of their personalized pet). Hub gets a
+      // brief delay to insert the pet row from its Mint event watcher.
+      if (result.tokenId && spriteUrl) {
+        const hubBase = process.env.NEXT_PUBLIC_HUB_URL ?? 'http://localhost:3001'
+        const tryPersist = async () => {
+          for (let i = 0; i < 6; i++) {
+            try {
+              const res = await fetch(`${hubBase}/api/pets/${result.tokenId}/sprite`, {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ spriteUrl }),
+              })
+              if (res.ok) return true
+            } catch {
+              // Hub may not see the pet row yet; retry a few times
+            }
+            await new Promise((r) => setTimeout(r, 1500))
+          }
+          return false
+        }
+        void tryPersist()
+      }
+
       setStep('done')
     } catch (err) {
       setMintError((err as Error).message)

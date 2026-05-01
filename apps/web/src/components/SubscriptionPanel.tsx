@@ -1,7 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { PixelDialog, PixelButton, PixelCard } from './ui'
+import { useActivityEvents } from '@/hooks/useActivityEvents'
 
 interface SubscriptionPanelProps {
   open: boolean
@@ -50,6 +51,31 @@ export function SubscriptionPanel({ open, onClose, petId }: SubscriptionPanelPro
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<CancelResp | null>(null)
+
+  // Subscribe to live Hub activity. When the worker's Brain.decide() finishes
+  // it emits subscription-proposals via socket.io. Karmanay's mock tx history
+  // doesn't line up with our UI's canned 5-item list, so we don't try to
+  // merge per-row — instead we use the first real proposal's `reason` as the
+  // petCommentary so the user sees actual LLM output.
+  const { events } = useActivityEvents(
+    open ? petId : null,
+    'subscription-proposals',
+  )
+
+  useEffect(() => {
+    if (events.length === 0) return
+    const latest = events[events.length - 1]
+    if (latest.type !== 'subscription-proposals' || !latest.proposals?.length) return
+    setScan((prev) =>
+      prev
+        ? {
+            ...prev,
+            petCommentary: latest.proposals![0].reason || prev.petCommentary,
+            source: 'hub' as const,
+          }
+        : prev,
+    )
+  }, [events])
 
   async function runScan() {
     setView('scanning')

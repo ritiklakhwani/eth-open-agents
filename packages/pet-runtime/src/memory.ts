@@ -43,7 +43,10 @@ export class Memory {
     return row?.strength ?? 0
   }
 
-  strengthenFriendship(otherPetId: number) {
+  /// Increment friendship strength and report new value + whether a milestone
+  /// was just crossed (3 = first attestation threshold). The worker uses this
+  /// to fire an ENS attestation IPC up to the Hub.
+  strengthenFriendship(otherPetId: number): { strength: number; crossedThreshold: number | null } {
     const [a, b] = [Math.min(this.petId, otherPetId), Math.max(this.petId, otherPetId)]
     this.db.prepare(`
       INSERT INTO friendships (pet_a, pet_b, strength, last_interaction)
@@ -52,6 +55,17 @@ export class Memory {
         strength = strength + 1,
         last_interaction = excluded.last_interaction
     `).run(a, b, Date.now())
+
+    const updated = this.db.prepare(
+      'SELECT strength FROM friendships WHERE pet_a = ? AND pet_b = ?'
+    ).get(a, b) as { strength: number } | undefined
+    const strength = updated?.strength ?? 1
+
+    // Thresholds where we issue a fresh attestation: 3, 10, 25
+    const thresholds = [3, 10, 25]
+    const crossedThreshold = thresholds.includes(strength) ? strength : null
+
+    return { strength, crossedThreshold }
   }
 
   getPet() {

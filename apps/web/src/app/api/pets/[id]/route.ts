@@ -17,6 +17,7 @@ interface HubPetRow {
   peer_id: string | null
   blob_cid: string | null
   archetype: string | null
+  sprite_url: string | null
   mood: number
   energy: number
   hunger: number
@@ -42,7 +43,7 @@ function normalize(row: HubPetRow): Pet {
     ensName: row.ens_name ?? `${row.name ?? 'pet'}.tama.eth`,
     ownerAddress: (row.owner_address ?? '0x0000000000000000000000000000000000000000') as `0x${string}`,
     walletAddress: (row.wallet_address ?? '0x0000000000000000000000000000000000000000') as `0x${string}`,
-    spriteUrl: `/sprites/${archetype}.png`,
+    spriteUrl: row.sprite_url || `/sprites/${archetype}.png`,
     blobCID: row.blob_cid ?? '',
     archetype,
     mood: row.mood,

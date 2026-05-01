@@ -2,10 +2,12 @@
 
 import { useEffect, useState } from 'react'
 import type { Zone } from 'shared-types'
+import { useAccount } from 'wagmi'
 import { World } from '@/components/World'
 import { MailboxFlow } from '@/components/MailboxFlow'
 import { SubscriptionPanel } from '@/components/SubscriptionPanel'
 import { BattleArena } from '@/components/BattleArena'
+import { BreedingFlow } from '@/components/BreedingFlow'
 
 /**
  * Dev: load petId from URL ?pet= query so you can open two windows with different pets:
@@ -34,6 +36,8 @@ export default function WorldPage() {
   const [petId, setPetId] = useState<number | null>(null)
   const [currentZone, setCurrentZone] = useState<Zone | null>(null)
   const [activeModal, setActiveModal] = useState<InteractiveZone | null>(null)
+  const [breedingOpen, setBreedingOpen] = useState(false)
+  const { address } = useAccount()
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -72,7 +76,11 @@ export default function WorldPage() {
 
   return (
     <>
-      <World petId={petId} onZoneEntered={setCurrentZone} />
+      <World
+        petId={petId}
+        onZoneEntered={setCurrentZone}
+        onBreed={() => setBreedingOpen(true)}
+      />
 
       {/* "Press E to interact" prompt — only when in an interactive zone
           and no modal is open. Pet keeps moving freely; player chooses when
@@ -101,6 +109,12 @@ export default function WorldPage() {
         open={activeModal === 'arena'}
         onClose={() => setActiveModal(null)}
         petId={petId}
+      />
+      <BreedingFlow
+        open={breedingOpen}
+        onClose={() => setBreedingOpen(false)}
+        petId={petId}
+        ownerAddress={address}
       />
     </>
   )

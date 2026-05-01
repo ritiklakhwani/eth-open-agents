@@ -6,16 +6,20 @@
 // We loop over subIds, calling Hub /approve once per cancellation. Each call
 // returns { ok: true } and the workflow id arrives via socket.io. We synthesize
 // the savings response shape the UI expects regardless of where the data came from.
+//
+// Slug → on-chain numeric ID mapping is fetched from Hub /api/keeperhub/subscription/map
+// at request time. The Hub seeds these IDs at boot via execute_contract_call →
+// SubscriptionRegistry.registerSub. Falls back to a hardcoded 1..5 when the seed
+// hasn't run yet (e.g. fresh deploy before first Hub boot).
 
-import { callHub } from '@/lib/hub'
+import { callHub, HUB_URL } from '@/lib/hub'
 
 interface CancelPayload {
   petId: number
   subIds: string[]
 }
 
-// Map UI string ids → numeric ids the Hub uses for SubscriptionRegistry
-const SUB_ID_TO_NUM: Record<string, number> = {
+const FALLBACK_SUB_ID_TO_NUM: Record<string, number> = {
   sub_netflix: 1,
   sub_spotify: 2,
   sub_dropbox: 3,
@@ -31,6 +35,20 @@ const SUB_ID_TO_AMOUNT: Record<string, number> = {
   sub_chatgpt: 20.0,
 }
 
+async function fetchSubMap(): Promise<Record<string, number>> {
+  try {
+    const res = await fetch(`${HUB_URL}/api/keeperhub/subscription/map`, {
+      signal: AbortSignal.timeout(2000),
+      cache: 'no-store',
+    })
+    if (!res.ok) return FALLBACK_SUB_ID_TO_NUM
+    const json = (await res.json()) as { map: Record<string, number>; seeded: boolean }
+    return json.seeded && Object.keys(json.map).length ? json.map : FALLBACK_SUB_ID_TO_NUM
+  } catch {
+    return FALLBACK_SUB_ID_TO_NUM
+  }
+}
+
 export async function POST(req: Request) {
   let body: CancelPayload
   try {
@@ -42,10 +60,12 @@ export async function POST(req: Request) {
     return Response.json({ error: 'petId, subIds[] required' }, { status: 400 })
   }
 
+  const slugMap = await fetchSubMap()
+
   // Fire one Hub call per cancellation
   const hubAcks = await Promise.all(
     body.subIds.map((slug) => {
-      const numericId = SUB_ID_TO_NUM[slug]
+      const numericId = slugMap[slug] ?? FALLBACK_SUB_ID_TO_NUM[slug]
       if (numericId == null) return Promise.resolve(null)
       return callHub<{ ok?: boolean }>('/api/keeperhub/subscription/approve', {
         method: 'POST',
@@ -67,6 +87,7 @@ export async function POST(req: Request) {
   return Response.json({
     workflowId: `kh_sub_${Date.now().toString(36)}`,
     cancelledSubIds: body.subIds,
+    cancelledSubOnchainIds: body.subIds.map((s) => slugMap[s] ?? FALLBACK_SUB_ID_TO_NUM[s] ?? null),
     monthlySavingsUsdc: Math.round(totalSavingsUsdc * 100) / 100,
     annualSavingsUsdc:  Math.round(totalSavingsUsdc * 12 * 100) / 100,
     status: 'scheduled',

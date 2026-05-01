@@ -33,6 +33,8 @@ export class WorldScene extends Phaser.Scene {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys
   private wasd!: Record<'W' | 'A' | 'S' | 'D', Phaser.Input.Keyboard.Key>
   private otherPets = new Map<number, Phaser.GameObjects.Rectangle>()
+  private petSprites = new Map<number, Phaser.GameObjects.Image>()  // overlays the rectangles
+  private spriteLoadAttempted = new Set<number>()
   private currentZone: Zone = 'park'
   private zoneRects: Phaser.GameObjects.Zone[] = []
   private mp!: MultiplayerClient
@@ -149,6 +151,52 @@ export class WorldScene extends Phaser.Scene {
 
     // Cleanup on scene shutdown
     this.events.once('shutdown', () => this.mp.disconnect())
+
+    // Async-load the user's own sprite (uploaded photo → OpenAI gpt-image-1
+    // pixel-art creature, persisted to /sprites/<hash>.png by the API and
+    // referenced via Hub's sprite_url column). The Pet Inspector also reads
+    // this; here we overlay a Phaser Image on top of the player rectangle.
+    void this.loadPetSprite(this.petId)
+  }
+
+  /// Fetch a pet's sprite_url from /api/pets/[id], load the texture, and
+  /// add a Phaser Image overlay synced to the rectangle each frame. Falls
+  /// back to leaving the rectangle visible if no sprite is available.
+  private async loadPetSprite(petId: number) {
+    if (this.spriteLoadAttempted.has(petId)) return
+    this.spriteLoadAttempted.add(petId)
+    try {
+      const res = await fetch(`/api/pets/${petId}`, { cache: 'no-store' })
+      if (!res.ok) return
+      const data = (await res.json()) as { pet?: { spriteUrl?: string } }
+      const url = data.pet?.spriteUrl
+      // Skip default archetype fallback PNGs that don't exist on disk
+      if (!url || /\/sprites\/(sage|gremlin|athlete|joker|scholar)\.png$/.test(url)) return
+
+      const key = `pet-${petId}-${url.split('/').pop()?.split('?')[0] ?? Date.now()}`
+
+      // Phaser load can fire after create() if we call this.load.start() again
+      this.load.image(key, url)
+      this.load.once(`filecomplete-image-${key}`, () => {
+        if (!this.scene.isActive()) return
+        const rect = petId === this.petId ? this.player : this.otherPets.get(petId)
+        if (!rect) return
+        const sprite = this.add.image(rect.x, rect.y, key)
+        sprite.setDisplaySize(28, 28)
+        sprite.setDepth(50)
+        this.petSprites.set(petId, sprite)
+        rect.setFillStyle(0x000000, 0)        // hide rectangle fill
+        rect.setStrokeStyle(0)                 // hide outline
+      })
+      this.load.once(`loaderror`, (file: { key: string }) => {
+        if (file.key === key) {
+          console.warn(`[WorldScene] failed to load sprite ${url} for pet ${petId}`)
+        }
+      })
+      this.load.start()
+    } catch (err) {
+      console.warn(`[WorldScene] sprite fetch failed for pet ${petId}:`, (err as Error).message)
+    }
   }
 
   update(_time: number, _delta: number) {
@@ -171,7 +219,20 @@ export class WorldScene extends Phaser.Scene {
 
     body.setVelocity(vx, vy)
 
-    // Broadcast position at 10 Hz
+    // Sync sprite overlays with their underlying rectangles every frame.
+    // The rectangle holds the physics body / camera target; sprite is purely
+    // visual. Drift-free because we update each frame from the rect's pos.
+    for (const [petId, sprite] of this.petSprites) {
+      const rect = petId === this.petId ? this.player : this.otherPets.get(petId)
+      if (rect) sprite.setPosition(rect.x, rect.y)
+    }
+
+    // Only broadcast position when the user is ACTIVELY pressing keys.
+    // When all keys release, the Hub stops getting move() events for ~2s
+    // and its wander tick takes over — pet auto-wanders around the park.
+    // Press a key again, manual control resumes.
+    const isMoving = vx !== 0 || vy !== 0
+    if (!isMoving) return
     const now = this.time.now
     if (now - this.lastBroadcast > 1000 / this.BROADCAST_HZ) {
       this.lastBroadcast = now
@@ -219,35 +280,48 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private updateOtherPets(positions: Record<number, { x: number; y: number; zone: Zone }>) {
-    // Add or update sprites for other pets
+    // Add or update rectangles + lazily fetch their sprites
     for (const [idStr, pos] of Object.entries(positions)) {
       const id = Number(idStr)
       if (id === this.petId) continue
 
-      let sprite = this.otherPets.get(id)
-      if (!sprite) {
-        // New pet — create a cyan rectangle (different color from player)
-        sprite = this.add.rectangle(pos.x, pos.y, 24, 24, 0x00d4ff, 1)
-        sprite.setStrokeStyle(2, 0x0a0c2e)
-        this.otherPets.set(id, sprite)
+      let rect = this.otherPets.get(id)
+      if (!rect) {
+        // New pet — create a cyan rectangle as initial render. The sprite
+        // overlay (loaded async from /api/pets/:id) replaces the visible
+        // fill once the texture lands.
+        rect = this.add.rectangle(pos.x, pos.y, 24, 24, 0x00d4ff, 1)
+        rect.setStrokeStyle(2, 0x0a0c2e)
+        this.otherPets.set(id, rect)
+        void this.loadPetSprite(id)
       }
-      sprite.setPosition(pos.x, pos.y)
+      rect.setPosition(pos.x, pos.y)
     }
 
     // Remove sprites for pets no longer in positions
-    for (const [id, sprite] of this.otherPets) {
+    for (const [id, rect] of this.otherPets) {
       if (!(String(id) in positions)) {
-        sprite.destroy()
+        rect.destroy()
         this.otherPets.delete(id)
+        const sprite = this.petSprites.get(id)
+        if (sprite) {
+          sprite.destroy()
+          this.petSprites.delete(id)
+        }
       }
     }
   }
 
   private removeOtherPet(petId: number) {
-    const sprite = this.otherPets.get(petId)
+    const rect = this.otherPets.get(petId)
+    if (rect) {
+      rect.destroy()
+      this.otherPets.delete(petId)
+    }
+    const sprite = this.petSprites.get(petId)
     if (sprite) {
       sprite.destroy()
-      this.otherPets.delete(petId)
+      this.petSprites.delete(petId)
     }
   }
 

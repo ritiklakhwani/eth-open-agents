@@ -49,6 +49,7 @@ export class PetSupervisor {
   }
 
   async start() {
+    await this.respawnExisting()
     console.log(`[Supervisor] Watching ${ADDRESSES_SEPOLIA.TamaPet} for Mint events`)
     this.client.watchContractEvent({
       address: ADDRESSES_SEPOLIA.TamaPet,
@@ -89,6 +90,9 @@ export class PetSupervisor {
       INSERT OR IGNORE INTO pets (token_id, name, owner_address, wallet_address, blob_cid, archetype, ens_name, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(tokenId, name, owner, wallet, blobCID, archetype, `${name}.tama.eth`, Date.now())
+
+    this.scheduleAllowanceWorkflow(tokenId, wallet)
+      .catch(err => console.error(`[Pet ${tokenId}] allowance workflow error:`, err.message))
 
     // Repo root sits 3 levels above this file: apps/hub/src/PetSupervisor.ts
     const repoRoot   = path.resolve(__dirname, '..', '..', '..')
@@ -163,6 +167,62 @@ export class PetSupervisor {
 
     this.workers.set(tokenId, worker)
     console.log(`[Supervisor] Spawned pet ${tokenId} — ${name}.tama.eth`)
+  }
+
+  // ── Bug 2: re-fork workers for pets that survived a Hub restart ──────────────
+  private async respawnExisting() {
+    type PetRow = {
+      token_id:      number
+      name:          string
+      owner_address: string
+      wallet_address: string
+      blob_cid:      string
+      archetype:     number
+    }
+    const pets = this.db.prepare(
+      'SELECT token_id, name, owner_address, wallet_address, blob_cid, archetype FROM pets'
+    ).all() as PetRow[]
+
+    let count = 0
+    for (const pet of pets) {
+      if (this.workers.has(pet.token_id)) continue
+      this.spawnPet({
+        tokenId:   pet.token_id,
+        owner:     pet.owner_address as `0x${string}`,
+        name:      pet.name,
+        blobCID:   pet.blob_cid ?? '',
+        archetype: Number(pet.archetype ?? 0),
+        traits:    0n,
+        wallet:    pet.wallet_address as `0x${string}`,
+      })
+      count++
+    }
+    if (count > 0) console.log(`[Supervisor] Re-spawned ${count} existing pet(s) from DB`)
+  }
+
+  // ── Bug 3: register recurring allowance workflow — idempotent ─────────────
+  private async scheduleAllowanceWorkflow(petId: number, petWalletAddress: string) {
+    const existing = this.db.prepare(
+      "SELECT id FROM keeperhub_workflows WHERE pet_id = ? AND kind = 'allowance' LIMIT 1"
+    ).get(petId)
+    if (existing) return
+
+    const { connectKeeperHub, createRecurringAllowance } = await import('keeperhub')
+    const client = await connectKeeperHub()
+    try {
+      const wf = await createRecurringAllowance(client, {
+        petId,
+        petWalletAddress: petWalletAddress as `0x${string}`,
+        amountUSDC: '5',
+        walletIntegrationId: process.env.KEEPERHUB_WALLET_INTEGRATION_ID ?? '',
+      })
+      this.db.prepare(
+        'INSERT OR IGNORE INTO keeperhub_workflows (id, pet_id, kind, status, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+      ).run(wf.id, petId, 'allowance', 'active', JSON.stringify(wf), Date.now())
+      console.log(`[Pet ${petId}] Allowance workflow registered: ${wf.id}`)
+    } finally {
+      await client.close()
+    }
   }
 
   broadcast(petId: number, msg: Record<string, unknown>) {

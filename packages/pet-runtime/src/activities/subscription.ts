@@ -23,21 +23,28 @@ export async function scanSubscriptions(
   brain:        Brain,
   ownerAddress: string,
 ): Promise<SubscriptionProposal[]> {
-  const analysis = await brain.decide(
-    'Analyze these recurring USDC subscriptions and identify the top 3 to cancel for cost savings. Be concise.',
-    { ownerAddress, subscriptions: MOCK_TX_HISTORY },
-  )
-
-  // Sort by monthly cost descending, pick top 3; attach AI reasoning as the proposal rationale
-  return [...MOCK_TX_HISTORY]
+  // Sort by cost descending, keep top 3 candidates
+  const candidates = [...MOCK_TX_HISTORY]
     .sort((a, b) => parseFloat(b.amount) - parseFloat(a.amount))
     .slice(0, 3)
-    .map(sub => ({
-      subscriptionId: sub.id,
-      name:           sub.name,
-      amountUSDC:     sub.amount,
-      reason:         analysis.slice(0, 140),
-    }))
+
+  // Call Brain once per candidate so each proposal gets its own rationale
+  const proposals = await Promise.all(
+    candidates.map(async sub => {
+      const reason = await brain.decide(
+        `Should the owner cancel "${sub.name}" ($${sub.amount}/mo)? Give a one-sentence recommendation.`,
+        { ownerAddress, subscription: sub },
+      )
+      return {
+        subscriptionId: sub.id,
+        name:           sub.name,
+        amountUSDC:     sub.amount,
+        reason:         reason.slice(0, 140),
+      }
+    }),
+  )
+
+  return proposals
 }
 
 export async function approveSubscriptionCancellation(args: {

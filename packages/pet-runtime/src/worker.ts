@@ -115,7 +115,7 @@ async function main() {
           amountUSDC:          m.amountUSDC           as string,
           walletIntegrationId: m.walletIntegrationId  as string,
         })
-        process.send?.({ type: 'mailbox-queued', petId: PET_ID, toPetId: m.toPetId, workflowId: result.workflowId })
+        process.send?.({ type: 'mailbox-queued', petId: PET_ID, toPetId: m.toPetId, workflowId: result.workflowId, amountUSDC: m.amountUSDC })
       } catch (err) {
         console.error(`[Pet ${PET_ID}] mailbox-send error:`, (err as Error).message)
       }

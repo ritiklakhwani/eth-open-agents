@@ -14,6 +14,7 @@ import { Server as SocketIOServer } from 'socket.io'
 import { EventEmitter } from 'events'
 import { initDB } from './db'
 import { PetSupervisor } from './PetSupervisor'
+import { registerGlobalChat } from './global-chat'
 import type { Zone } from 'shared-types'
 
 // ── Shared event bus (pet workers → SSE clients) ─────────────────────────────
@@ -424,6 +425,12 @@ async function main() {
   })
   supervisor.setIO(io)
 
+  // Global human-owner text chat (separate channel from pet AXL chat).
+  // Registers its own io.on('connection') handler that listens for
+  // "user-join" / "user-message" — does not interfere with the pet
+  // multiplayer "join" / "move" handlers below.
+  registerGlobalChat(io)
+
   // In-memory position table: petId → { x, y, zone }
   const positions = new Map<number, { x: number; y: number; zone: Zone }>()
 
@@ -554,32 +561,84 @@ async function main() {
     }
   }, 100)
 
-  // Proximity chat: when two pets are within 80px, trigger one AXL chat exchange.
+  // Proximity chat: when two pets are within PROXIMITY_INIT_PX, trigger one
+  // AXL chat exchange. Once chatting, the conversation ends if they drift past
+  // PROXIMITY_BREAK_PX so the bubble stops mid-flight when one wanders away.
   // Tuned for "pets visibly chatting" feel without smashing Anthropic Haiku
   // (50 req/min cap). The canned-opener fallback in the worker means even
   // a 429 doesn't blank the chat — bubble still renders.
   //  - Per-pair cooldown 30s (so same two pets keep talking when adjacent)
-  //  - Global throttle 4s (~15 broker fires/min × 2 workers ≈ 30 Haiku/min)
+  //  - Global throttle 4s (~15 broker fires/min x 2 workers ~ 30 Haiku/min)
   //  - Random pair selection per tick — fairness across pets
+  const PROXIMITY_INIT_PX     = 110
+  const PROXIMITY_BREAK_PX    = 160
+  const PROXIMITY_COOLDOWN_MS = 8_000
+  const BROKER_THROTTLE_MS    = 1_500
+
   const lastProximityChat = new Map<string, number>()
-  const PROXIMITY_COOLDOWN_MS = 30_000
   let lastBrokerFire = 0
-  const BROKER_THROTTLE_MS = 4_000
+
+  // Pets currently engaged in a Hub-brokered conversation. Both directions of
+  // the pair share the same entry; cleared when bubble lands or proximity breaks.
+  const activeChats = new Map<number, number>()  // petId -> partnerPetId
+
+  function distanceBetween(a: number, b: number): number | null {
+    const pa = positions.get(a)
+    const pb = positions.get(b)
+    if (!pa || !pb) return null
+    return Math.hypot(pa.x - pb.x, pa.y - pb.y)
+  }
+
+  function endChat(a: number, b: number) {
+    if (activeChats.get(a) === b) activeChats.delete(a)
+    if (activeChats.get(b) === a) activeChats.delete(b)
+    // Tell both workers to abort any in-flight reply they were about to send
+    supervisor.broadcast(a, { type: 'chat-end', withPetId: b })
+    supervisor.broadcast(b, { type: 'chat-end', withPetId: a })
+  }
+
+  // Gate every chat-out IPC: if the speaker is no longer paired with the
+  // listener, or they've drifted past PROXIMITY_BREAK_PX, drop the bubble.
+  supervisor.setChatGate((fromId, toId) => {
+    const partner = activeChats.get(fromId)
+    if (partner !== toId) return false
+    const d = distanceBetween(fromId, toId)
+    if (d == null) return false
+    if (d > PROXIMITY_BREAK_PX) {
+      endChat(fromId, toId)
+      console.log(`[Broker] Chat ended pet ${fromId}<->${toId} drift=${d.toFixed(0)}px`)
+      return false
+    }
+    return true
+  })
 
   setInterval(() => {
     const now = Date.now()
+
+    // Sweep: if any active pair drifted past the break threshold, end it now
+    // so the next reply is skipped at the IPC layer.
+    for (const [petId, partner] of activeChats) {
+      if (petId > partner) continue   // process each pair once
+      const d = distanceBetween(petId, partner)
+      if (d == null || d > PROXIMITY_BREAK_PX) {
+        endChat(petId, partner)
+        console.log(`[Broker] Chat swept pet ${petId}<->${partner} (drift)`)
+      }
+    }
+
     if (now - lastBrokerFire < BROKER_THROTTLE_MS) return
 
     const pets = Array.from(positions.entries())
-    // Build candidate pairs within 80px that aren't on cooldown
+    // Build candidate pairs within PROXIMITY_INIT_PX that aren't on cooldown
     const candidates: Array<[number, number, { peer_id: string; name: string }, { peer_id: string; name: string }]> = []
     for (let i = 0; i < pets.length; i++) {
       for (let j = i + 1; j < pets.length; j++) {
         const [a, posA] = pets[i]
         const [b, posB] = pets[j]
-        if (Math.hypot(posA.x - posB.x, posA.y - posB.y) >= 80) continue
+        if (Math.hypot(posA.x - posB.x, posA.y - posB.y) >= PROXIMITY_INIT_PX) continue
         const pairKey = `${Math.min(a, b)}-${Math.max(a, b)}`
         if ((lastProximityChat.get(pairKey) ?? 0) + PROXIMITY_COOLDOWN_MS > now) continue
+        if (activeChats.has(a) || activeChats.has(b)) continue
 
         const petA = db.prepare('SELECT peer_id, name FROM pets WHERE token_id = ?')
           .get(a) as { peer_id: string | null; name: string } | undefined
@@ -606,6 +665,9 @@ async function main() {
     // Pause both pets so they stand still while talking
     inConversation.set(a, now + CONVO_PAUSE_MS)
     inConversation.set(b, now + CONVO_PAUSE_MS)
+
+    activeChats.set(a, b)
+    activeChats.set(b, a)
 
     supervisor.broadcast(a, { type: 'chat-request', withPetId: b, withPeerId: petB.peer_id, withName: petB.name })
     supervisor.broadcast(b, { type: 'chat-request', withPetId: a, withPeerId: petA.peer_id, withName: petA.name })

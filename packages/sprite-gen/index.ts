@@ -111,6 +111,44 @@ async function openAITextToImage(userPrompt: string, archetype?: string): Promis
   return Buffer.from(b64, 'base64')
 }
 
+const OPENAI_BREED_PROMPT =
+  'Create a child pet creature that visually blends features from these two parent ' +
+  'pets. The child should be clearly recognizable as their offspring — inheriting ' +
+  "colors, body shape, ears, eyes, and accessories from both parents. Same 16-bit " +
+  'pixel art chibi style, vivid saturated colors, sharp pixel edges, transparent ' +
+  'background, centered, full body, facing the viewer.'
+
+async function openAIBlendTwoImages(
+  bufA: Buffer, mimeA: string,
+  bufB: Buffer, mimeB: string,
+  childName?: string,
+): Promise<Buffer> {
+  const client = getOpenAI()
+  if (!client) throw new Error('OPENAI_API_KEY not set')
+
+  const extA = mimeA === 'image/png' ? 'png' : 'jpg'
+  const extB = mimeB === 'image/png' ? 'png' : 'jpg'
+  const fileA = await toFile(bufA, `parentA.${extA}`, { type: mimeA })
+  const fileB = await toFile(bufB, `parentB.${extB}`, { type: mimeB })
+
+  const prompt = childName
+    ? `${OPENAI_BREED_PROMPT} The child is named "${childName}".`
+    : OPENAI_BREED_PROMPT
+
+  const resp = await client.images.edit({
+    model:   OPENAI_MODEL,
+    image:   [fileA, fileB],
+    prompt,
+    size:    '1024x1024',
+    quality: OPENAI_QUALITY,
+    n:       1,
+  })
+
+  const b64 = resp.data?.[0]?.b64_json
+  if (!b64) throw new Error('OpenAI returned no image')
+  return Buffer.from(b64, 'base64')
+}
+
 async function fetchPollinations(prompt: string): Promise<Buffer> {
   const params = new URLSearchParams({
     model: POLLINATIONS_MODEL,
@@ -187,6 +225,33 @@ export async function generateFromPrompt(
   }
   const pngBytes = await pixelize(raw)
   return { pngBytes, source: 'prompt' }
+}
+
+/// Breed two parent sprites into a child that visually inherits from both.
+/// Tries OpenAI multi-image edit first (genuine blend). On failure, falls back
+/// to a Pollinations text-prompt that mentions both parents — looks generic
+/// but at least the demo doesn't blank out.
+export async function generateFromTwoImages(
+  bufA: Buffer, mimeA: string,
+  bufB: Buffer, mimeB: string,
+  opts?: { childName?: string; archetype?: string },
+): Promise<SpriteResult> {
+  let raw: Buffer
+  try {
+    raw = await openAIBlendTwoImages(bufA, mimeA, bufB, mimeB, opts?.childName)
+    console.log('[sprite-gen] OpenAI 2-image blend OK')
+  } catch (err) {
+    console.warn(
+      `[sprite-gen] OpenAI blend failed (${(err as Error).message.slice(0, 80)}) — falling back to Pollinations`,
+    )
+    const arch = opts?.archetype
+    const prompt = arch
+      ? `a child pet creature that combines traits of two parent creatures, ${arch} archetype`
+      : 'a child pet creature that combines traits of two parent creatures'
+    raw = await fetchPollinations(buildPollinationsPrompt(prompt, arch))
+  }
+  const pngBytes = await pixelize(raw)
+  return { pngBytes, source: 'image' }
 }
 
 /// Back-compat shim. Older callers used pixelatePhoto and expected a hosted URL.

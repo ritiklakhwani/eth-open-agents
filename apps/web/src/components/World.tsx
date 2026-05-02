@@ -4,6 +4,18 @@ import { useEffect, useRef, useState } from 'react'
 import type { Zone } from 'shared-types'
 import { PetInspector } from './PetInspector'
 
+/**
+ * Loose Phaser.Scene-shaped object so consumers (e.g. ZoneActionBanner)
+ * can subscribe to scene events without importing Phaser into their type
+ * graph. Phaser is dynamically imported here to keep it out of SSR.
+ */
+export interface SceneEventEmitter {
+  events: {
+    on:  (event: string, fn: (...args: unknown[]) => void) => void
+    off: (event: string, fn: (...args: unknown[]) => void) => void
+  }
+}
+
 interface WorldProps {
   petId: number
   /** WebSocket server URL — defaults to localhost for dev */
@@ -12,6 +24,13 @@ interface WorldProps {
   onZoneEntered?: (zone: Zone) => void
   /** Callback when user clicks the BREED button on the pet inspector */
   onBreed?: () => void
+  /**
+   * Surfaces the live Phaser scene up to the page so React components can
+   * subscribe to lower-level scene events (`zone-changed`, `partner-enter`)
+   * without re-implementing the dynamic-import dance. Called once when the
+   * scene boots and again with `null` on teardown.
+   */
+  onSceneReady?: (scene: SceneEventEmitter | null) => void
 }
 
 /**
@@ -20,7 +39,7 @@ interface WorldProps {
  *
  * Phaser is dynamically imported because it touches `window` and breaks SSR.
  */
-export function World({ petId, socketServerUrl, onZoneEntered, onBreed }: WorldProps) {
+export function World({ petId, socketServerUrl, onZoneEntered, onBreed, onSceneReady }: WorldProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const gameRef = useRef<unknown>(null) // Phaser.Game; typed loosely to avoid SSR import
   const [zone, setZone] = useState<Zone>('park')
@@ -30,6 +49,8 @@ export function World({ petId, socketServerUrl, onZoneEntered, onBreed }: WorldP
   // every time the parent re-renders (e.g. on modal open/close).
   const onZoneEnteredRef = useRef(onZoneEntered)
   useEffect(() => { onZoneEnteredRef.current = onZoneEntered })
+  const onSceneReadyRef = useRef(onSceneReady)
+  useEffect(() => { onSceneReadyRef.current = onSceneReady })
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -80,10 +101,18 @@ export function World({ petId, socketServerUrl, onZoneEntered, onBreed }: WorldP
             setZone(newZone)
             onZoneEnteredRef.current?.(newZone)
           })
+          // Surface the scene to consumers (banner, etc.) so they can
+          // subscribe to lower-level scene events on their own.
+          onSceneReadyRef.current?.(scene as unknown as SceneEventEmitter)
         }
       }, 100)
 
-      cleanup = () => game.destroy(true)
+      cleanup = () => {
+        // Tell consumers the scene is gone before we destroy the game so they
+        // can drop their listeners cleanly.
+        onSceneReadyRef.current?.(null)
+        game.destroy(true)
+      }
     })()
 
     return () => {

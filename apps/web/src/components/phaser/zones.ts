@@ -1,7 +1,11 @@
 import * as Phaser from 'phaser'
 import type { Zone } from 'shared-types'
 
-const VALID_ZONES = new Set<string>(['park', 'office', 'arena', 'lounge', 'kitchen', 'mailbox'])
+const VALID_ZONES = new Set<string>(['park', 'office', 'arena', 'lounge', 'kitchen', 'mailbox', 'society', 'breeding', 'pond'])
+
+// Zones the Hub has /api/zones/<name>/enter endpoints for. The wider VALID_ZONES
+// is for type-narrowing and event-firing; the POST is gated to known endpoints.
+const POSTABLE_ZONES = new Set<string>(['park', 'office', 'arena', 'lounge', 'kitchen', 'mailbox'])
 
 /**
  * Creates static physics-enabled zones from the "zones" object layer in a
@@ -34,7 +38,7 @@ export function parseZonesFromTiledMap(
 
 /** Notifies the Hub that a pet entered a named zone (fire-and-forget). */
 export function onZoneEnter(zoneName: string, petId: number) {
-  if (!VALID_ZONES.has(zoneName)) return
+  if (!POSTABLE_ZONES.has(zoneName)) return
   fetch(`/api/zones/${zoneName}/enter`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },

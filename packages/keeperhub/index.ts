@@ -28,6 +28,19 @@ const ADDRESSES = {
   ENSPublicResolver: '0x8FADE66B79cC9f707aB26799354482EB93a5B7dD',
 } as const
 
+function publicHubBaseUrl(): string | undefined {
+  const raw = process.env.HUB_BASE_URL?.trim().replace(/\/$/, '')
+  if (!raw) return undefined
+
+  try {
+    const { hostname } = new URL(raw)
+    if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(hostname)) return undefined
+    return raw
+  } catch {
+    return undefined
+  }
+}
+
 // ── Result type for created workflows ───────────────────────────────────────
 export interface CreatedWorkflow {
   id: string
@@ -166,7 +179,7 @@ export async function createScheduledGift(
 //
 // The killer demo: pet A wants to send a gift to pet B who is offline.
 // We poll pet B's ENS text record `tama.lastSeenBlock` every minute. When it's
-// recent (within the last 5 blocks ~ 60 seconds on Sepolia), fire the transfer.
+// recent (within the freshness window), fire the transfer.
 //
 // Pet B's worker writes lastSeenBlock on every event-loop tick (see ens.heartbeatLastSeen).
 
@@ -178,17 +191,17 @@ export interface ConditionalMailboxArgs {
   amountUSDC: string
   walletIntegrationId: string
   pollCron?: string            // default: every minute
-  freshBlockWindow?: number    // default: 5 blocks = ~60s
+  freshBlockWindow?: number    // default: 30 blocks = several minutes on Sepolia
 }
 
 export async function createConditionalMailbox(
   client: KeeperHubClient,
   args: ConditionalMailboxArgs,
 ): Promise<CreatedWorkflow> {
-  const pollCron = args.pollCron ?? '* * * * *'
-  const window = args.freshBlockWindow ?? 5
+  const window = args.freshBlockWindow ?? 30
 
-  const trigger = triggerNode('Schedule', { cron: pollCron, timezone: 'UTC' })
+  const hubBaseUrl = publicHubBaseUrl()
+  const trigger = triggerNode('Manual', {})
 
   // Read pet B's tama.lastSeenBlock text record from ENS PublicResolver
   const readBlock = actionNode('read-1', 150, 'web3/read-contract', {
@@ -216,15 +229,35 @@ export async function createConditionalMailbox(
     decimals: 6,
   }, 'Deliver gift')
 
+  const notifyHub = hubBaseUrl
+    ? actionNode('webhook-1', 750, 'webhook', {
+        url: `${hubBaseUrl}/api/keeperhub/mailbox/delivered`,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workflowName: `mailbox-${args.fromPetId}-to-${args.toPetId}`,
+          fromPetId: args.fromPetId,
+          toPetId: args.toPetId,
+          amountUSDC: args.amountUSDC,
+        }),
+      }, 'Mark gift delivered')
+    : null
+
+  const nodes = notifyHub
+    ? [trigger, readBlock, cond, transfer, notifyHub]
+    : [trigger, readBlock, cond, transfer]
+  const edges = [
+    edge('trigger-1', 'read-1'),
+    edge('read-1', 'cond-1'),
+    edge('cond-1', 'transfer-1', 'true'),
+    ...(notifyHub ? [edge('transfer-1', 'webhook-1')] : []),
+  ]
+
   const result = await client.callTool('create_workflow', {
     name: `mailbox-${args.fromPetId}-to-${args.toPetId}`,
-    description: `HERO: Deliver gift to ${args.toPetEnsName} when they come online`,
-    nodes: [trigger, readBlock, cond, transfer],
-    edges: [
-      edge('trigger-1', 'read-1'),
-      edge('read-1', 'cond-1'),
-      edge('cond-1', 'transfer-1', 'true'),
-    ],
+    description: `HERO: Hub auto-executes this gift when ${args.toPetEnsName} comes online`,
+    nodes,
+    edges,
   })
   return result as CreatedWorkflow
 }

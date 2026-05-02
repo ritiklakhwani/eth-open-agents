@@ -52,6 +52,17 @@ async function main() {
   // Write peerId into DB so hub can broadcast it to the frontend
   memory.updatePeerIdAndZone(peerId, 'park')
 
+  // Hub-driven proximity gate: cleared by `chat-end` when pets drift apart so
+  // the next queued reply (mid 1.5-3s pacing) skips its send.
+  const activeChatPartner: { id: number | null } = { id: null }
+
+  // Natural pacing window (ms) — keeps replies from feeling like LLM autocomplete.
+  const REPLY_DELAY_MIN_MS = 700
+  const REPLY_DELAY_MAX_MS = 1_700
+  const pickReplyDelay = () =>
+    REPLY_DELAY_MIN_MS + Math.floor(Math.random() * (REPLY_DELAY_MAX_MS - REPLY_DELAY_MIN_MS))
+  const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
+
   // ── 5. Notify hub of our peerId via IPC so hub can update ENS ───────────
   // (ENS registration lives in hub/PetSupervisor — Ritik's ens package)
   process.send?.({ type: 'peer-ready', petId: PET_ID, peerId, ensName: ENS_NAME })
@@ -76,6 +87,8 @@ async function main() {
       const withPeerId = m.withPeerId as string
       const withName   = m.withName   as string
 
+      activeChatPartner.id = withPetId
+
       // Try Brain first; if Anthropic is rate-limited or unreachable, fall back
       // to a canned opener so chat ALWAYS lands visually. Park social demo
       // shouldn't blank out just because Haiku is overloaded.
@@ -85,6 +98,13 @@ async function main() {
       } catch (err) {
         opener = pickCannedOpener(withName)
         console.warn(`[Pet ${PET_ID}] brain failed, using canned opener: ${(err as Error).message.slice(0, 60)}`)
+      }
+
+      // Pace the opener so it doesn't feel like LLM autocomplete spam.
+      await sleep(pickReplyDelay())
+      if (activeChatPartner.id !== withPetId) {
+        console.log(`[Pet ${PET_ID}] opener skipped — pet ${withPetId} drifted away`)
+        return
       }
 
       try {
@@ -103,6 +123,13 @@ async function main() {
         }
       } catch (err) {
         console.error(`[Pet ${PET_ID}] chat-request error:`, (err as Error).message)
+      }
+
+    } else if (m.type === 'chat-end') {
+      const withPetId = m.withPetId as number
+      if (activeChatPartner.id === withPetId) {
+        activeChatPartner.id = null
+        console.log(`[Pet ${PET_ID}] chat-end with pet ${withPetId}`)
       }
 
     } else if (m.type === 'mailbox-send') {
@@ -181,6 +208,10 @@ async function main() {
       const text     = msg.text as string
       const fromId   = msg.fromPetId as number
 
+      // Receiving a chat means the Hub paired us; track the partner so
+      // chat-end (drift) can cancel the queued reply before it lands.
+      activeChatPartner.id = fromId
+
       // Brain reply with canned-fallback so we never silently drop a turn
       let reply: string
       try {
@@ -192,6 +223,15 @@ async function main() {
       }
 
       memory.add({ kind: 'chat', content: { text, from: fromPeerId }, counterpartyPetId: fromId })
+
+      // Pace the reply so the conversation reads naturally; bail if the
+      // Hub ended the chat (proximity broke) while we were waiting.
+      await sleep(pickReplyDelay())
+      if (activeChatPartner.id !== fromId) {
+        console.log(`[Pet ${PET_ID}] reply skipped — pet ${fromId} drifted away`)
+        return
+      }
+
       const friendship = memory.strengthenFriendship(fromId)
       await axl.send(fromPeerId, { type: 'chat', text: reply, fromPetId: PET_ID })
       process.send?.({ type: 'chat-out', petId: PET_ID, toPetId: fromId, text: reply })

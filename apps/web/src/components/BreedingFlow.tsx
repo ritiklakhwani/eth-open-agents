@@ -98,17 +98,63 @@ export function BreedingFlow({ open, onClose, petId, ownerAddress }: BreedingFlo
     try {
       const parentAPet = pets?.find((p) => p.tokenId === parentA)
       const parentBPet = pets?.find((p) => p.tokenId === parentB)
-      // Inherit archetype: 50/50 between parents (deterministic by tokenId)
-      const inheritedArchetype =
+      // Inherit archetype from one parent (50/50 by tokenId parity).
+      // Older pets in DB stored archetype as a numeric string ('1', '2.0') —
+      // normalize to the canonical name list. Anything we can't recognize
+      // safely falls back to 'sage' (archetype index 0).
+      const ARCHETYPES = ['sage', 'gremlin', 'athlete', 'joker', 'scholar'] as const
+      const rawArchetype =
         (parentA! + parentB!) % 2 === 0 ? parentAPet?.archetype : parentBPet?.archetype
+      const normalized = (() => {
+        if (typeof rawArchetype === 'string' && (ARCHETYPES as readonly string[]).includes(rawArchetype)) {
+          return rawArchetype as typeof ARCHETYPES[number]
+        }
+        // Try parse as numeric index ('1', '2.0', etc.)
+        const asNum = Math.trunc(Number(rawArchetype))
+        if (Number.isFinite(asNum) && asNum >= 0 && asNum < ARCHETYPES.length) {
+          return ARCHETYPES[asNum]
+        }
+        return 'sage'
+      })()
+      const archetypeIndex = ARCHETYPES.indexOf(normalized)
 
-      // 1. Upload child blob to 0G with parent lineage in metadata
+      // 1a. Generate the child's sprite by visually blending both parents.
+      // Calls /api/pets/sprite/breed which fetches both parent sprites and
+      // sends them to OpenAI gpt-image-1 multi-image edit. Falls back to
+      // archetype-default URL if both parents lack sprite_url.
+      let childSpriteUrl = `/sprites/${normalized}.png`
+      try {
+        const aResp = await fetch(`/api/pets/${parentA}`).then(r => r.json()) as { pet?: { spriteUrl?: string } }
+        const bResp = await fetch(`/api/pets/${parentB}`).then(r => r.json()) as { pet?: { spriteUrl?: string } }
+        const aUrl = aResp.pet?.spriteUrl
+        const bUrl = bResp.pet?.spriteUrl
+        if (aUrl && bUrl) {
+          const breedRes = await fetch('/api/pets/sprite/breed', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({
+              parentASpriteUrl: aUrl,
+              parentBSpriteUrl: bUrl,
+              childName:        trimmed,
+              archetype:        normalized,
+            }),
+          })
+          if (breedRes.ok) {
+            const { spriteUrl: blended } = (await breedRes.json()) as { spriteUrl: string }
+            if (blended) childSpriteUrl = blended
+          }
+        }
+      } catch (err) {
+        console.warn('[BreedingFlow] sprite blend failed, using archetype default:', err)
+      }
+
+      // 1b. Upload child blob to 0G with parent lineage in metadata
       const blobRes = await fetch('/api/pets/blob', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          spriteUrl: `/sprites/${inheritedArchetype ?? 'sage'}.png`,
-          archetype: inheritedArchetype ?? 'sage',
+          spriteUrl: childSpriteUrl,
+          archetype: normalized,
           name: trimmed,
           // Parent lineage encoded in personality so it surfaces in
           // the pet inspector + future ENS subname-tree demo
@@ -128,9 +174,7 @@ export function BreedingFlow({ open, onClose, petId, ownerAddress }: BreedingFlo
           to: recipient,
           name: trimmed,
           blobCID: cid,
-          archetype: ['sage', 'gremlin', 'athlete', 'joker', 'scholar'].indexOf(
-            inheritedArchetype ?? 'sage',
-          ),
+          archetype: archetypeIndex,
           // traits: encode parent IDs in the upper bits so they're recoverable on-chain
           //   bits 0-15  = parentA tokenId
           //   bits 16-31 = parentB tokenId
@@ -155,6 +199,25 @@ export function BreedingFlow({ open, onClose, petId, ownerAddress }: BreedingFlo
                 method:  'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body:    JSON.stringify({ parentName: parentAPet.name }),
+              })
+              if (res.ok) return
+            } catch { /* retry */ }
+            await new Promise((res) => setTimeout(res, 1500))
+          }
+        })()
+      }
+
+      // Persist the blended child sprite URL so /world renders it (otherwise
+      // the child appears as a default cyan rectangle).
+      if (r.tokenId && childSpriteUrl) {
+        const hubBase = process.env.NEXT_PUBLIC_HUB_URL ?? 'http://localhost:3001'
+        void (async () => {
+          for (let i = 0; i < 6; i++) {
+            try {
+              const res = await fetch(`${hubBase}/api/pets/${r.tokenId}/sprite`, {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ spriteUrl: childSpriteUrl }),
               })
               if (res.ok) return
             } catch { /* retry */ }

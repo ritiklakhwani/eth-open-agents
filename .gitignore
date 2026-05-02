@@ -33,3 +33,8 @@ apps/web/public/sprites/
 # Local AI tooling (uipro-cli skill install — per-developer, not shared)
 .claude/skills/
 
+# Source asset packs (we copy what we need into apps/web/public/tilesets/)
+/kenney_tiny-town/
+/Sprout Lands*/
+
+*.bak

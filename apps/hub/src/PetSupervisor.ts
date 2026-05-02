@@ -41,11 +41,18 @@ export class PetSupervisor {
     chain: sepolia,
     transport: http(process.env.SEPOLIA_RPC_URL),
   })
+  // Hub registers this so chat fan-out is gated by live proximity. Returning
+  // false tells the supervisor to drop the bubble (pets drifted apart).
+  private chatGate?: (fromPetId: number, toPetId: number) => boolean
 
   constructor(private db: DB) {}
 
   setIO(io: SocketIOServer) {
     this.io = io
+  }
+
+  setChatGate(gate: (fromPetId: number, toPetId: number) => boolean) {
+    this.chatGate = gate
   }
 
   async start() {
@@ -130,10 +137,16 @@ export class PetSupervisor {
           .catch(err => console.warn(`[Pet ${m.petId}] ENS mint skipped:`, err.message))
 
       } else if (m.type === 'chat-out') {
+        const fromId = m.petId   as number
+        const toId   = m.toPetId as number
+        if (this.chatGate && !this.chatGate(fromId, toId)) {
+          console.log(`[Chat] Pet ${fromId} -> Pet ${toId} dropped (out of proximity)`)
+          return
+        }
         const text = String(m.text ?? '').slice(0, 80)
-        console.log(`[Chat] Pet ${m.petId} → Pet ${m.toPetId}: "${text}"`)
+        console.log(`[Chat] Pet ${fromId} -> Pet ${toId}: "${text}"`)
         this.io?.to('world').emit('chat', {
-          from: m.petId, to: m.toPetId, text: m.text, timestamp: Date.now(),
+          from: fromId, to: toId, text: m.text, timestamp: Date.now(),
         })
 
       } else if (m.type === 'mailbox-queued') {
@@ -318,12 +331,13 @@ export class PetSupervisor {
       ? `${row.name}.${parentName}.tama.eth`
       : `${row.name}.tama.eth`
 
-    // Check existing addr() — if already minted at the expected name, skip
+    // Check existing addr() — if already minted at the expected name, skip.
+    // For nested names we pass "<child>.<parent>" so namehash gets
+    // <child>.<parent>.tama.eth (readPetAddrFromENS appends .tama.eth).
     const ens = await import('ens')
     try {
-      const existing = parentName
-        ? await ens.readTextRecord(expectedFullName.replace(/\.tama\.eth$/, ''), 'addr', rpcUrl).catch(() => '')
-        : await ens.readPetAddrFromENS(row.name, rpcUrl)
+      const lookupName = parentName ? `${row.name}.${parentName}` : row.name
+      const existing = await ens.readPetAddrFromENS(lookupName, rpcUrl)
       if (existing && existing.toLowerCase() === row.wallet_address.toLowerCase()) {
         console.log(`[Pet ${petId}] ENS subname ${expectedFullName} already minted — skipping`)
         await ens.heartbeatLastSeen(row.name, rpcUrl, signerKey).catch(() => {})

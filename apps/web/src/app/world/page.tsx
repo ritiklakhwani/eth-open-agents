@@ -3,11 +3,13 @@
 import { useEffect, useState } from 'react'
 import type { Zone } from 'shared-types'
 import { useAccount } from 'wagmi'
-import { World } from '@/components/World'
+import { World, type SceneEventEmitter } from '@/components/World'
 import { MailboxFlow } from '@/components/MailboxFlow'
 import { SubscriptionPanel } from '@/components/SubscriptionPanel'
 import { BattleArena } from '@/components/BattleArena'
 import { BreedingFlow } from '@/components/BreedingFlow'
+import { GlobalChat } from '@/components/GlobalChat'
+import { ZoneActionBanner } from '@/components/ZoneActionBanner'
 
 /**
  * Dev: load petId from URL ?pet= query so you can open two windows with different pets:
@@ -37,6 +39,7 @@ export default function WorldPage() {
   const [currentZone, setCurrentZone] = useState<Zone | null>(null)
   const [activeModal, setActiveModal] = useState<InteractiveZone | null>(null)
   const [breedingOpen, setBreedingOpen] = useState(false)
+  const [scene, setScene] = useState<SceneEventEmitter | null>(null)
   const { address } = useAccount()
 
   useEffect(() => {
@@ -80,6 +83,17 @@ export default function WorldPage() {
         petId={petId}
         onZoneEntered={setCurrentZone}
         onBreed={() => setBreedingOpen(true)}
+        onSceneReady={setScene}
+      />
+
+      {/* Contextual zone-action banner — listens to scene events and offers
+          a single primary action for the zone the player is standing in.
+          Auto-dismisses on no-action zones (park / society / pond). */}
+      <ZoneActionBanner
+        scene={scene}
+        onOpenMailbox={() => setActiveModal('mailbox')}
+        onOpenOffice={() => setActiveModal('office')}
+        onOpenBreeding={() => setBreedingOpen(true)}
       />
 
       {/* "Press E to interact" prompt — only when in an interactive zone
@@ -116,6 +130,9 @@ export default function WorldPage() {
         petId={petId}
         ownerAddress={address}
       />
+
+      {/* Global human-owner chat — bottom-right, collapsible */}
+      <GlobalChat />
     </>
   )
 }

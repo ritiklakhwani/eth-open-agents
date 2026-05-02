@@ -1,7 +1,7 @@
 // Shared types between Hub (Karmanay) and Frontend (Ritik).
 // Ritik writes, Karmanay imports as read-only.
 
-export type Zone = 'park' | 'office' | 'arena' | 'lounge' | 'kitchen' | 'mailbox'
+export type Zone = 'park' | 'office' | 'arena' | 'lounge' | 'kitchen' | 'mailbox' | 'society' | 'breeding' | 'pond'
 
 export type Archetype = 'sage' | 'gremlin' | 'athlete' | 'joker' | 'scholar'
 
@@ -31,6 +31,35 @@ export interface SocketEvents {
   zoneExit: { petId: number; zone: Zone }
   petJoined: { pet: Pet }
   petLeft: { petId: number }
+  // Global human user chat (separate from pet AXL chat)
+  'user-list': { users: OnlineUser[] }
+  'user-message': UserChatMessage
+}
+
+// ── Global user chat (humans, not pets) ─────────────────────────────────────
+// A connected human owner identified by wallet address. Lives only in-memory
+// on the Hub — not persisted.
+export interface OnlineUser {
+  socketId: string
+  address: `0x${string}`
+  ensName?: string
+}
+
+// One chat message broadcast to all connected owners.
+export interface UserChatMessage {
+  fromAddress: `0x${string}`
+  text: string
+  timestamp: number
+}
+
+// Client-to-server payload shapes for the global chat.
+export interface UserJoinPayload {
+  address: `0x${string}`
+  ensName?: string
+}
+
+export interface UserMessagePayload {
+  text: string
 }
 
 // REST endpoints

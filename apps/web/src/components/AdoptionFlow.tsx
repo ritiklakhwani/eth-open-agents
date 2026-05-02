@@ -235,12 +235,30 @@ export function AdoptionFlow({ open, onClose, ownerAddress }: AdoptionFlowProps)
     setStep('minting')
     setMintError(null)
     try {
+      // If the user skipped photo/prompt, auto-generate a sprite via text-prompt
+      // so every pet has a real on-disk sprite. Required for breeding to do
+      // multi-image visual blending later — without this, parents fall back to
+      // archetype default URLs that don't exist on disk.
+      let finalSpriteUrl = spriteUrl
+      if (!finalSpriteUrl) {
+        try {
+          const fd = new FormData()
+          fd.append('prompt', `a ${archetype} pet creature named ${name.trim()}`)
+          fd.append('archetype', archetype)
+          const res = await fetch('/api/pets/sprite', { method: 'POST', body: fd })
+          if (res.ok) {
+            const j = (await res.json()) as { spriteUrl: string }
+            finalSpriteUrl = j.spriteUrl
+          }
+        } catch { /* fall back to archetype path */ }
+      }
+
       // 1. Upload identity blob to 0G Storage
       const blobRes = await fetch('/api/pets/blob', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          spriteUrl: spriteUrl ?? defaultSpriteFor(archetype),
+          spriteUrl: finalSpriteUrl ?? defaultSpriteFor(archetype),
           archetype,
           name: name.trim(),
         }),
@@ -275,7 +293,7 @@ export function AdoptionFlow({ open, onClose, ownerAddress }: AdoptionFlowProps)
       // and pet inspector can render it (otherwise the user sees the default
       // archetype rectangle instead of their personalized pet). Hub gets a
       // brief delay to insert the pet row from its Mint event watcher.
-      if (result.tokenId && spriteUrl) {
+      if (result.tokenId && finalSpriteUrl) {
         const hubBase = process.env.NEXT_PUBLIC_HUB_URL ?? 'http://localhost:3001'
         const tryPersist = async () => {
           for (let i = 0; i < 6; i++) {
@@ -283,7 +301,7 @@ export function AdoptionFlow({ open, onClose, ownerAddress }: AdoptionFlowProps)
               const res = await fetch(`${hubBase}/api/pets/${result.tokenId}/sprite`, {
                 method:  'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body:    JSON.stringify({ spriteUrl }),
+                body:    JSON.stringify({ spriteUrl: finalSpriteUrl }),
               })
               if (res.ok) return true
             } catch {

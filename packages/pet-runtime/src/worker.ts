@@ -21,6 +21,18 @@ const repoRoot  = path.resolve(process.cwd())
 const configPath = path.join(repoRoot, 'data', 'axl-configs', `pet-${PET_ID}.json`)
 const binaryPath = path.join(repoRoot, 'bin', 'axl-node')
 
+function hasPublicHubBaseUrl(): boolean {
+  const raw = process.env.HUB_BASE_URL?.trim()
+  if (!raw) return false
+
+  try {
+    const { hostname } = new URL(raw)
+    return !['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(hostname)
+  } catch {
+    return false
+  }
+}
+
 async function main() {
   console.log(`[Pet ${PET_ID}] Starting — ${ENS_NAME}.tama.eth`)
 
@@ -147,7 +159,15 @@ async function main() {
           amountUSDC:          m.amountUSDC           as string,
           walletIntegrationId: m.walletIntegrationId  as string,
         })
-        process.send?.({ type: 'mailbox-queued', petId: PET_ID, toPetId: m.toPetId, workflowId: result.workflowId, amountUSDC: m.amountUSDC })
+        process.send?.({
+          type: 'mailbox-queued',
+          petId: PET_ID,
+          toPetId: m.toPetId,
+          workflowId: result.workflowId,
+          amountUSDC: m.amountUSDC,
+          message: typeof m.message === 'string' ? m.message : '',
+          deliveryMode: hasPublicHubBaseUrl() ? 'hub-auto-with-webhook' : 'hub-auto',
+        })
       } catch (err) {
         console.error(`[Pet ${PET_ID}] mailbox-send error:`, (err as Error).message)
       }

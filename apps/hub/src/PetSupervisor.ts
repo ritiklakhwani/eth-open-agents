@@ -34,6 +34,8 @@ interface MintArgs {
   wallet:    `0x${string}`
 }
 
+const ENS_HEARTBEAT_INTERVAL_MS = Number(process.env.ENS_HEARTBEAT_INTERVAL_MS ?? 60_000)
+
 export class PetSupervisor {
   private workers = new Map<number, ChildProcess>()
   private io?: SocketIOServer
@@ -53,6 +55,10 @@ export class PetSupervisor {
 
   setChatGate(gate: (fromPetId: number, toPetId: number) => boolean) {
     this.chatGate = gate
+  }
+
+  hasWorker(tokenId: number): boolean {
+    return this.workers.has(tokenId)
   }
 
   async start() {
@@ -135,6 +141,8 @@ export class PetSupervisor {
         // Fire-and-forget — pet shouldn't block on ENS confirms.
         this.mintEnsSubnameForPet(m.petId as number)
           .catch(err => console.warn(`[Pet ${m.petId}] ENS mint skipped:`, err.message))
+        this.bumpLastSeenForPetId(m.petId as number)
+          .catch(err => console.warn(`[Pet ${m.petId}] ENS online heartbeat skipped:`, err.message))
 
       } else if (m.type === 'chat-out') {
         const fromId = m.petId   as number
@@ -153,6 +161,8 @@ export class PetSupervisor {
         this.db.prepare(
           'INSERT OR IGNORE INTO keeperhub_workflows (id, pet_id, kind, status, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)'
         ).run(m.workflowId, m.petId, 'mailbox', 'active', JSON.stringify(m), Date.now())
+        this.bumpLastSeenForPetId(Number(m.toPetId))
+          .catch(err => console.warn(`[Mailbox] recipient heartbeat skipped:`, err.message))
         this.io?.to('world').emit('activity', {
           type: 'mailbox-queued', petId: m.petId, toPetId: m.toPetId, workflowId: m.workflowId, timestamp: Date.now(),
         })
@@ -227,6 +237,7 @@ export class PetSupervisor {
     worker.on('exit', (code) => {
       console.log(`[Pet ${tokenId}] exited (code ${code})`)
       this.workers.delete(tokenId)
+      this.db.prepare('UPDATE pets SET peer_id = NULL WHERE token_id = ?').run(tokenId)
     })
 
     this.workers.set(tokenId, worker)
@@ -366,9 +377,9 @@ export class PetSupervisor {
   }
 
   // ── A3: ENS heartbeat tick — bump lastSeenBlock for all alive pets every
-  // 10 minutes. The KeeperHub conditional mailbox workflow polls this record;
-  // updating it makes the conditional fire organically when a recipient is
-  // "online enough" instead of needing manual Trigger-Now button.
+  // minute by default. The KeeperHub conditional mailbox workflow polls this
+  // record; updating it makes the conditional fire organically when a
+  // recipient is "online enough" instead of needing manual Trigger-Now button.
   startEnsHeartbeat() {
     const rpcUrl    = process.env.SEPOLIA_RPC_URL
     const signerKey = process.env.DEPLOYER_PRIVATE_KEY as `0x${string}` | undefined
@@ -392,9 +403,10 @@ export class PetSupervisor {
       console.log(`[ENS] Heartbeat sent for ${pets.length} pet(s)`)
     }
 
-    // Initial bump 30s after boot, then every 10 min
-    setTimeout(() => { void tick() }, 30_000)
-    setInterval(tick, 10 * 60_000)
+    // Initial bump shortly after boot, then keep it fresh for KeeperHub's
+    // one-minute schedule trigger.
+    setTimeout(() => { void tick() }, 10_000)
+    setInterval(tick, ENS_HEARTBEAT_INTERVAL_MS)
   }
 
   // ── A3 helper: bump a single pet's lastSeenBlock now (used after battle
@@ -409,6 +421,14 @@ export class PetSupervisor {
     } catch (err) {
       console.warn(`[ENS] bumpLastSeen(${petName}) failed: ${(err as Error).message}`)
     }
+  }
+
+  async bumpLastSeenForPetId(petId: number) {
+    if (!Number.isFinite(petId) || !this.workers.has(petId)) return
+    const row = this.db.prepare('SELECT name FROM pets WHERE token_id = ? AND peer_id IS NOT NULL AND peer_id != ?')
+      .get(petId, '') as { name: string } | undefined
+    if (!row?.name) return
+    await this.bumpLastSeen(row.name)
   }
 
   // ── ENS Most Creative: friendship attestation ──────────────────────────────

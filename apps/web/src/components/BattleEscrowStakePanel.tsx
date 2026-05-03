@@ -62,6 +62,7 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
   const [pet2Staked, setPet2Staked] = useState(false)
   const [battleExists, setBattleExists] = useState(false)
 
+  const [fundTx, setFundTx] = useState<Hash | null>(null)
   const [approveSkipped, setApproveSkipped] = useState(false)
   const [approveTx, setApproveTx] = useState<Hash | null>(null)
   const [stakeTx, setStakeTx] = useState<Hash | null>(null)
@@ -160,6 +161,7 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
   const myStakeDone = signingSlot === 'pet1' ? pet1Staked : signingSlot === 'pet2' ? pet2Staked : false
 
   useEffect(() => {
+    setFundTx(null)
     setApproveSkipped(false)
     setApproveTx(null)
     setStakeTx(null)
@@ -176,6 +178,11 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
       onChainPet2.toLowerCase() === pet2Wallet.toLowerCase())
 
   const allowanceReady = approveSkipped || approveTx !== null
+  const canShowFundButton =
+    !!signingWallet &&
+    !!signingSlot &&
+    !myStakeDone &&
+    correctChain
   const canShowStakeButtons =
     !!signingWallet &&
     !!signingSlot &&
@@ -217,6 +224,24 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
     }
   }
 
+  async function runFundWallet() {
+    if (!publicClient || !signingWallet || !correctChain) return
+    setStepError(null)
+    resetWrite()
+    try {
+      const hash = await writeContractAsync({
+        address: ADDRESSES_SEPOLIA.USDC,
+        abi: erc20Abi,
+        functionName: 'transfer',
+        args: [signingWallet, stakeWei],
+      })
+      await publicClient.waitForTransactionReceipt({ hash })
+      setFundTx(hash)
+    } catch (e) {
+      setStepError(formatRpcError(e))
+    }
+  }
+
   async function runStake() {
     if (!publicClient || !signingWallet || !correctChain) return
     setStepError(null)
@@ -247,15 +272,16 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
         <div className="mb-3 border-2 border-[color:var(--color-yellow)] bg-[color:var(--color-bg-deep)] p-2 sm:p-3">
           <p className="font-[family-name:var(--font-pixel-readable)] text-sm text-[color:var(--color-ink)]">
             <span className="font-[family-name:var(--font-pixel)] text-[color:var(--color-yellow)]">ACTION: </span>
-            Click <strong>Approve USDC</strong> then <strong>Stake in escrow</strong> below (once per pet slot).
-            Opening the battle from the list does <strong>not</strong> stake — MetaMask must confirm these txs.
+            Click <strong>Fund Pet Wallet</strong>, then <strong>Approve USDC</strong>, then{' '}
+            <strong>Stake in escrow</strong> below (once per pet slot). Opening the battle from the list does{' '}
+            <strong>not</strong> stake — MetaMask must confirm these txs.
           </p>
         </div>
       )}
       <p className="font-[family-name:var(--font-pixel-readable)] text-sm text-[color:var(--color-ink-mid)] mb-3">
         Each pet wallet must stake {match.stakeUsdc} USDC on Sepolia. Connect the wallet that{' '}
-        <strong>owns your pet NFT</strong>, then sign approve + stake on that pet&apos;s smart wallet. The other
-        player does the same from their account (same battle id / escrow key).
+        <strong>owns your pet NFT</strong>, fund that pet&apos;s smart wallet from MetaMask, then sign approve + stake
+        on the pet wallet. The other player does the same from their account (same battle id / escrow key).
       </p>
 
       {loadError && (
@@ -330,24 +356,45 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
         )}
       </div>
 
-      {canShowStakeButtons && (
+      {canShowFundButton && (
         <div className="flex flex-col gap-2 mb-2">
           <div className="flex flex-wrap gap-2">
             <PixelButton
               variant="primary"
-              disabled={isPending || allowanceReady}
-              onClick={() => void runApprove()}
+              disabled={isPending || myStakeDone}
+              onClick={() => void runFundWallet()}
             >
-              {approveSkipped ? '1. Allowance OK (skipped)' : approveTx ? '1. Approved ✓' : '1. Approve USDC'}
+              {fundTx ? '1. Funded ✓' : `1. Fund Pet Wallet (${match.stakeUsdc} USDC)`}
             </PixelButton>
-            <PixelButton
-              variant="danger"
-              disabled={isPending || !allowanceReady}
-              onClick={() => void runStake()}
-            >
-              2. Stake in escrow
-            </PixelButton>
+            {canShowStakeButtons && (
+              <>
+                <PixelButton
+                  variant="primary"
+                  disabled={isPending || allowanceReady}
+                  onClick={() => void runApprove()}
+                >
+                  {approveSkipped ? '2. Allowance OK (skipped)' : approveTx ? '2. Approved ✓' : '2. Approve USDC'}
+                </PixelButton>
+                <PixelButton
+                  variant="danger"
+                  disabled={isPending || !allowanceReady}
+                  onClick={() => void runStake()}
+                >
+                  3. Stake in escrow
+                </PixelButton>
+              </>
+            )}
           </div>
+          {fundTx && (
+            <p className="text-[10px] text-[color:var(--color-ink-low)]">
+              Pet wallet funding tx confirmed. If you click again, it will send another {match.stakeUsdc} USDC.
+            </p>
+          )}
+          {!battleExists && (
+            <p className="text-[10px] text-[color:var(--color-yellow)]">
+              Waiting for BattleEscrow <code>createBattle</code> on-chain. You can fund now; approve and stake appear after registration confirms.
+            </p>
+          )}
           {approveSkipped && (
             <p className="text-[10px] text-[color:var(--color-ink-low)]">
               Existing allowance covers this stake — no approve tx sent.
@@ -374,8 +421,16 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
         </p>
       )}
 
-      {(approveTx || stakeTx) && (
+      {(fundTx || approveTx || stakeTx) && (
         <ul className="mt-2 text-[10px] font-mono text-[color:var(--color-cyan)] space-y-1">
+          {fundTx && (
+            <li>
+              Fund:{' '}
+              <a className="underline" href={`${EXPLORER_TX}/${fundTx}`} target="_blank" rel="noreferrer">
+                {shortAddr(fundTx)}
+              </a>
+            </li>
+          )}
           {approveTx && (
             <li>
               Approve:{' '}

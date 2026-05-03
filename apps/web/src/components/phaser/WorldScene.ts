@@ -52,6 +52,21 @@ export class WorldScene extends Phaser.Scene {
   private dustEmitTimers = new Map<number, number>()
   private prevPositions  = new Map<number, { x: number; y: number }>()
 
+  // Pond ripple FX — bounds captured at scene init, per-pet emit throttle so
+  // any pet (player or NPC) standing in / wading through the pond rectangle
+  // sends out cyan ripple rings every ~350ms. Visible cue that the pond is
+  // a real interactive water surface, not just decoration.
+  private pondBounds: { x: number; y: number; w: number; h: number } | null = null
+  private rippleEmitTimers = new Map<number, number>()
+  // Pee FX — fires when a pet stands on the bank corner of the pond. Per-pet
+  // cooldown so the same pet doesn't pee back-to-back (15s).
+  private peeEmitTimers = new Map<number, number>()
+
+  // Per-pet name label — small pixel text floated above the sprite so users
+  // can identify which pet is which at a glance. Populated from the pet's
+  // `name` field on the same API call that loads the sprite.
+  private petLabels = new Map<number, Phaser.GameObjects.Text>()
+
   constructor() {
     super('WorldScene')
   }
@@ -186,8 +201,19 @@ export class WorldScene extends Phaser.Scene {
       const body = z.body as Phaser.Physics.Arcade.Body
       body.setAllowGravity(false)
       body.moves = false
+      // Capture pond rectangle bounds for the ripple-emit logic in update().
+      // OVERRIDDEN below — the world.tmj rect doesn't match the AI-painted
+      // pond in world-bg.png. We use a hand-tuned 142x142 box matching the
+      // visible water as measured by the user.
+      if (o.name === 'pond') {
+        this.pondBounds = { x: o.x, y: o.y, w: o.width, h: o.height }
+      }
       return z
     })
+
+    // Hand-tuned pond bounds — 142x142 matching the visible water in
+    // world-bg.png. Adjust x/y if the painted pond ever shifts.
+    this.pondBounds = { x: 60, y: 595, w: 142, h: 142 }
 
     // Partner integration buildings — separate trigger pool, emit `partner-enter`.
     this.partnerRects = partnerObjects.map(o => {
@@ -272,6 +298,24 @@ export class WorldScene extends Phaser.Scene {
     this.cursors = this.input.keyboard.createCursorKeys()
     this.wasd = this.input.keyboard.addKeys('W,A,S,D') as Record<'W' | 'A' | 'S' | 'D', Phaser.Input.Keyboard.Key>
 
+    // By default Phaser calls preventDefault() on its captured keys (WASD,
+    // arrows, space) so the page doesn't scroll while you play. The side
+    // effect: typing into a chat input never receives those keys because
+    // Phaser ate them first. Releasing the capture lets the events bubble
+    // through to the focused <input>/<textarea>; the `typing` guard in
+    // update() still prevents the player from moving while you type.
+    this.input.keyboard.removeCapture([
+      Phaser.Input.Keyboard.KeyCodes.W,
+      Phaser.Input.Keyboard.KeyCodes.A,
+      Phaser.Input.Keyboard.KeyCodes.S,
+      Phaser.Input.Keyboard.KeyCodes.D,
+      Phaser.Input.Keyboard.KeyCodes.SPACE,
+      Phaser.Input.Keyboard.KeyCodes.UP,
+      Phaser.Input.Keyboard.KeyCodes.DOWN,
+      Phaser.Input.Keyboard.KeyCodes.LEFT,
+      Phaser.Input.Keyboard.KeyCodes.RIGHT,
+    ])
+
     // Multiplayer client
     this.mp = new MultiplayerClient(this.petId, this.serverUrl)
     this.mp.join()
@@ -334,8 +378,9 @@ export class WorldScene extends Phaser.Scene {
     try {
       const res = await fetch(`/api/pets/${petId}`, { cache: 'no-store' })
       if (!res.ok) return
-      const data = (await res.json()) as { pet?: { spriteUrl?: string } }
-      const url = data.pet?.spriteUrl
+      const data = (await res.json()) as { pet?: { spriteUrl?: string; name?: string } }
+      const url  = data.pet?.spriteUrl
+      const name = (data.pet?.name ?? '').trim() || `pet-${petId}`
       // Skip default archetype fallback PNGs that don't exist on disk
       if (!url || /\/sprites\/(sage|gremlin|athlete|joker|scholar)\.png$/.test(url)) return
 
@@ -353,6 +398,20 @@ export class WorldScene extends Phaser.Scene {
         this.petSprites.set(petId, sprite)
         rect.setFillStyle(0x000000, 0)        // hide rectangle fill
         rect.setStrokeStyle(0)                 // hide outline
+
+        // Floating name tag — sits above the sprite. Pixel font, white
+        // with a chunky navy outline so it reads on every backdrop.
+        const label = this.add.text(rect.x, rect.y - 24, name, {
+          fontFamily:  'monospace',
+          fontSize:    '11px',
+          color:       '#ffffff',
+          stroke:      '#0a0c2e',
+          strokeThickness: 3,
+          resolution:  2,
+        })
+        label.setOrigin(0.5, 1)
+        label.setDepth(51)
+        this.petLabels.set(petId, label)
       })
       this.load.once(`loaderror`, (file: { key: string }) => {
         if (file.key === key) {
@@ -551,7 +610,11 @@ export class WorldScene extends Phaser.Scene {
     const idleBob = Math.sin(this.time.now / 280) * 1.5
     for (const [petId, sprite] of this.petSprites) {
       const rect = petId === this.petId ? this.player : this.otherPets.get(petId)
-      if (rect) sprite.setPosition(rect.x, rect.y + idleBob)
+      if (rect) {
+        sprite.setPosition(rect.x, rect.y + idleBob)
+        const label = this.petLabels.get(petId)
+        if (label) label.setPosition(rect.x, rect.y - 24 + idleBob)
+      }
     }
 
     const isMoving = vx !== 0 || vy !== 0
@@ -560,12 +623,30 @@ export class WorldScene extends Phaser.Scene {
     // Detect movement by comparing each pet's current position against last
     // frame. Each pet has its own throttle timer so the cadence stays the same
     // (one puff every ~120ms per pet) regardless of how many pets are moving.
+    // Skip dust for pets whose sprite failed to load — otherwise dust trails
+    // appear in mid-air with no visible pet (legacy archetype fallback URLs).
     const now = this.time.now
-    this.maybeEmitDust(this.petId, this.player.x, this.player.y, isMoving, now)
+    if (this.petSprites.has(this.petId)) {
+      this.maybeEmitDust(this.petId, this.player.x, this.player.y, isMoving, now)
+      // Pond ripples — fire whenever the player is inside the pond rect,
+      // moving or not. Idle wading still produces gentle rings.
+      this.maybeEmitRipple(this.petId, this.player.x, this.player.y, now)
+      this.maybeEmitPee(this.petId, this.player.x, this.player.y, now)
+    }
     for (const [otherId, rect] of this.otherPets) {
+      if (!this.petSprites.has(otherId)) continue
       const prev = this.prevPositions.get(otherId)
-      const moved = prev ? Math.hypot(rect.x - prev.x, rect.y - prev.y) > 1.2 : false
+      // Threshold tuned for the tweened-position cadence: other pets move
+      // via 100ms tweens, so a 6 px/tick wander speed = ~0.7 px per 60fps
+      // frame. Old 1.2 threshold filtered all of that out — only the local
+      // player (raw physics velocity) was emitting dust.
+      const moved = prev ? Math.hypot(rect.x - prev.x, rect.y - prev.y) > 0.3 : false
       this.maybeEmitDust(otherId, rect.x, rect.y, moved, now)
+      // Same pond check for NPC pets — any pet wandering through the pond
+      // sends out ripples, makes the world feel reactive even when the
+      // player isn't there.
+      this.maybeEmitRipple(otherId, rect.x, rect.y, now)
+      this.maybeEmitPee(otherId, rect.x, rect.y, now)
     }
     // Snapshot positions for next frame's "did it move" check.
     this.prevPositions.set(this.petId, { x: this.player.x, y: this.player.y })
@@ -929,24 +1010,143 @@ export class WorldScene extends Phaser.Scene {
     this.tweens.add({ targets: glow, scale: { from: 0.9, to: 1.1 }, alpha: { from: 0.2, to: 0.05 }, duration: 1800, yoyo: true, repeat: -1 })
   }
 
-  /// Spawns a fading dust puff behind a pet at (x, y) if `moving` and the
-  /// per-pet throttle has elapsed (~120ms between puffs). Used by both the
-  /// player and every other moving pet so the whole map gets the walking-polish
-  /// effect, not just the user.
+  /// Single soft dust puff behind a moving pet. Slightly larger and a
+  /// bit brighter than the original (4 px / alpha 0.55) so it's readable,
+  /// but stays subtle — no clusters, no aggressive expansion.
   private maybeEmitDust(petId: number, x: number, y: number, moving: boolean, now: number) {
     if (!moving) return
     const last = this.dustEmitTimers.get(petId) ?? 0
     if (now - last < 120) return
     this.dustEmitTimers.set(petId, now)
-    const dust = this.add.circle(x, y + 10, 4, 0xc4a878, 0.55)
+
+    const dust = this.add.circle(x, y + 12, 5, 0xd4bf90, 0.65)
     dust.setDepth(35)
     this.tweens.add({
-      targets: dust,
-      alpha: 0,
-      scale: 0.3,
-      duration: 500,
-      ease: 'Sine.easeOut',
+      targets:    dust,
+      alpha:      0,
+      scaleX:     1.1,
+      scaleY:     1.1,
+      y:          dust.y - 3,           // tiny upward drift
+      duration:   600,
+      ease:       'Sine.easeOut',
       onComplete: () => dust.destroy(),
+    })
+  }
+
+  /// Continuous pee stream — emits white droplets in a parabolic arc into
+  /// the pond water for as long as the pet stands at the EDGE of the
+  /// visible elliptical water. Throttled per-pet to ~1 droplet every 90ms.
+  /// No cooldown, no session limit — peeing stops the instant the pet
+  /// leaves the edge band, restarts when they return.
+  private maybeEmitPee(petId: number, x: number, y: number, now: number) {
+    if (!this.pondBounds) return
+    const b = this.pondBounds
+    // Visible pond water is an ellipse centered in the rect (see renderPond):
+    //   center (cx, cy), radii (rxWater, ryWater).
+    const cx       = b.x + b.w / 2
+    const cy       = b.y + b.h / 2
+    const rxWater  = (b.w - 32) / 2
+    const ryWater  = (b.h - 16) / 2
+
+    // Ellipse-distance test: <1 = inside water, =1 = on boundary, >1 = outside.
+    // Pee only fires when the pet is STRICTLY OUTSIDE the water but within
+    // a band around the rim — so a pet swimming inside the pond doesn't
+    // pee into the water it's already standing in.
+    const dx = x - cx
+    const dy = y - cy
+    const ellipseDist = (dx / rxWater) ** 2 + (dy / ryWater) ** 2
+    const nearEdge    = ellipseDist >= 1.05 && ellipseDist <= 1.6
+    if (!nearEdge) return
+
+    // Per-pet throttle: at most one droplet every 90ms. Since this fires
+    // every animation frame while the pet is at the edge, the result is
+    // a continuous stream that starts/stops with the pet's position.
+    const last = this.peeEmitTimers.get(petId) ?? 0
+    if (now - last < 90) return
+    this.peeEmitTimers.set(petId, now)
+
+    const startX  = x
+    const startY  = y - 6   // hip height — droplet leaves slightly above feet
+    // Splash lands at a fixed offset along the line from the pet toward
+    // the pond center. All droplets in this stream follow the SAME arc,
+    // so the stream reads as one coherent line rather than a scattered
+    // burst. Tiny ±2 px jitter keeps it from looking robotic.
+    const towardX = cx - x
+    const towardY = cy - y
+    const dist    = Math.max(1, Math.hypot(towardX, towardY))
+    const STREAM_REACH = 60   // distance from pet to splash point (px)
+    const splashX = x + (towardX / dist) * STREAM_REACH + (Math.random() - 0.5) * 4
+    const splashY = y + (towardY / dist) * STREAM_REACH + (Math.random() - 0.5) * 4
+    const peakHeight = 18  // arc height above the linear midpoint
+
+    // White droplet — high-contrast against the pond's dark cyan water.
+    const drop = this.add.circle(startX, startY, 2.5, 0xffffff, 1)
+    drop.setStrokeStyle(1, 0xc8d0e0, 0.9)
+    drop.setDepth(36)
+
+    // Single tween with parabolic onUpdate — t * (1-t) peaks at 0.5, so
+    // the droplet rises, peaks halfway, then falls into the pond. Phaser
+    // y increases downward so SUBTRACTING the parabola term arcs it UP.
+    this.tweens.add({
+      targets:  { t: 0 },
+      t:        1,
+      duration: 480,
+      ease:     'Linear',
+      onUpdate: (tween) => {
+        const t  = tween.progress
+        const px = startX + (splashX - startX) * t
+        const py = startY + (splashY - startY) * t - 4 * peakHeight * t * (1 - t)
+        drop.setPosition(px, py)
+      },
+      onComplete: () => {
+        drop.destroy()
+        // Small white splash ring at impact, on top of the pond water.
+        const splash = this.add.circle(splashX, splashY, 5, 0xffffff, 0)
+        splash.setStrokeStyle(2, 0xffffff, 0.85)
+        splash.setDepth(36)
+        this.tweens.add({
+          targets:    splash,
+          scaleX:     1.8,
+          scaleY:     1.8,
+          alpha:      0,
+          duration:   380,
+          ease:       'Sine.easeOut',
+          onComplete: () => splash.destroy(),
+        })
+      },
+    })
+  }
+
+  /// Spawns a cyan water ripple ring at (x, y) when a pet is SWIMMING in
+  /// the pond. Excludes the top-rim band (the same band where pee fires)
+  /// so a pet on the bank peeing doesn't also produce swim ripples — the
+  /// two effects are mutually exclusive.
+  private maybeEmitRipple(petId: number, x: number, y: number, now: number) {
+    if (!this.pondBounds) return
+    const b = this.pondBounds
+    // Outside the pond rect → no ripple
+    if (x < b.x || x > b.x + b.w || y < b.y || y > b.y + b.h) return
+    // Inside the pee band (top rim) → pet is peeing, not swimming. Skip.
+    // Mirror of the band used in maybeEmitPee.
+    if (y <= b.y + 30) return
+    const last = this.rippleEmitTimers.get(petId) ?? 0
+    if (now - last < 350) return
+    this.rippleEmitTimers.set(petId, now)
+
+    // Outline-only cyan ring; fill is transparent so the pond surface shows
+    // through. Slightly offset y so the ring origin reads as "around the
+    // pet's feet" rather than centered on the sprite.
+    const ring = this.add.circle(x, y + 8, 8, 0x4ad8ff, 0)
+    ring.setStrokeStyle(2, 0x4ad8ff, 0.85)
+    ring.setDepth(36) // above pond water (depth 0-ish), below pet sprite (50)
+    this.tweens.add({
+      targets:    ring,
+      scaleX:     2.6,
+      scaleY:     2.6,
+      alpha:      0,           // strokeAlpha tweens via the Phaser `alpha`
+      duration:   1200,
+      ease:       'Sine.easeOut',
+      onComplete: () => ring.destroy(),
     })
   }
 
@@ -992,11 +1192,18 @@ export class WorldScene extends Phaser.Scene {
         rect.destroy()
         this.otherPets.delete(id)
         this.dustEmitTimers.delete(id)
+        this.rippleEmitTimers.delete(id)
+        this.peeEmitTimers.delete(id)
         this.prevPositions.delete(id)
         const sprite = this.petSprites.get(id)
         if (sprite) {
           sprite.destroy()
           this.petSprites.delete(id)
+        }
+        const label = this.petLabels.get(id)
+        if (label) {
+          label.destroy()
+          this.petLabels.delete(id)
         }
       }
     }
@@ -1009,11 +1216,18 @@ export class WorldScene extends Phaser.Scene {
       this.otherPets.delete(petId)
     }
     this.dustEmitTimers.delete(petId)
+    this.rippleEmitTimers.delete(petId)
+    this.peeEmitTimers.delete(petId)
     this.prevPositions.delete(petId)
     const sprite = this.petSprites.get(petId)
     if (sprite) {
       sprite.destroy()
       this.petSprites.delete(petId)
+    }
+    const label = this.petLabels.get(petId)
+    if (label) {
+      label.destroy()
+      this.petLabels.delete(petId)
     }
   }
 

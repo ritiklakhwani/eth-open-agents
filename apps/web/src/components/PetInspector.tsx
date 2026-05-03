@@ -99,7 +99,7 @@ export function PetInspector({ petId, pollIntervalMs = 5000, onBreed }: PetInspe
   const archetypeColor = ARCHETYPE_COLOR[pet.archetype]
 
   return (
-    <div className="pointer-events-auto">
+    <div className="pointer-events-auto animate-panel-pop-tr">
       <div className="w-72 border border-[color:var(--color-yellow)]/35 bg-[rgba(10,12,46,0.78)] backdrop-blur-sm">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-[color:var(--color-yellow)]/20 bg-[rgba(10,12,46,0.5)] px-3 py-2">
@@ -116,7 +116,7 @@ export function PetInspector({ petId, pollIntervalMs = 5000, onBreed }: PetInspe
           </button>
         </div>
         {!collapsed && (
-          <div className="flex flex-col gap-3 p-3">
+          <div className="flex flex-col gap-3 p-3 animate-body-roll">
             {/* Sprite — shows the user-generated pixel-art pet */}
             {pet.spriteUrl && !/\/sprites\/(sage|gremlin|athlete|joker|scholar)\.png$/.test(pet.spriteUrl) && (
               <div className="flex justify-center">

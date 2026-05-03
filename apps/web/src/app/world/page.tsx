@@ -36,6 +36,7 @@ function isInteractive(z: Zone | null): z is InteractiveZone {
 
 export default function WorldPage() {
   const [petId, setPetId] = useState<number | null>(null)
+  const [spectator, setSpectator] = useState(false)
   const [currentZone, setCurrentZone] = useState<Zone | null>(null)
   const [activeModal, setActiveModal] = useState<InteractiveZone | null>(null)
   const [breedingOpen, setBreedingOpen] = useState(false)
@@ -50,10 +51,24 @@ export default function WorldPage() {
     setPetId(id)
   }, [])
 
+  // Ownership gate: fetch the pet's owner from Hub and compare to connected wallet.
+  // Sets spectator=true if wallet not connected or address doesn't match.
+  useEffect(() => {
+    if (petId === null) return
+    fetch(`/api/pets/${petId}`)
+      .then(r => r.ok ? r.json() : null)
+      .then((data: { pet?: { ownerAddress?: string } } | null) => {
+        if (!data?.pet?.ownerAddress) { setSpectator(true); return }
+        setSpectator(!address || data.pet.ownerAddress.toLowerCase() !== address.toLowerCase())
+      })
+      .catch(() => setSpectator(true))
+  }, [petId, address])
+
   // E key opens the modal for the current interactive zone
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== 'e' && e.key !== 'E') return
+      if (spectator) return                             // spectators can't interact
       if (activeModal !== null) return                  // already open
       if (!isInteractive(currentZone)) return           // not in an interactive zone
       // Don't capture E if user is typing in an input/textarea
@@ -63,7 +78,7 @@ export default function WorldPage() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [currentZone, activeModal])
+  }, [currentZone, activeModal, spectator])
 
   if (petId === null) {
     return (
@@ -75,25 +90,37 @@ export default function WorldPage() {
     )
   }
 
-  const showPrompt = isInteractive(currentZone) && activeModal === null
+  const showPrompt = !spectator && isInteractive(currentZone) && activeModal === null
 
   return (
     <>
       <World
         petId={petId}
+        spectator={spectator}
         onZoneEntered={setCurrentZone}
-        onBreed={() => setBreedingOpen(true)}
+        onBreed={spectator ? undefined : () => setBreedingOpen(true)}
         onSceneReady={setScene}
       />
+
+      {/* Spectator banner — shown when the connected wallet doesn't own this pet */}
+      {spectator && (
+        <div className="pointer-events-none fixed top-20 left-1/2 -translate-x-1/2 z-30">
+          <div className="border-2 border-[color:var(--color-yellow)] bg-[color:var(--color-bg-mid)] px-5 py-2 shadow-[2px_2px_0_0_var(--color-bg-deep)]">
+            <p className="font-[family-name:var(--font-pixel)] text-[10px] tracking-widest text-[color:var(--color-yellow)]">
+              SPECTATING · {address ? 'NOT YOUR PET' : 'CONNECT WALLET TO CONTROL'}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Contextual zone-action banner — listens to scene events and offers
           a single primary action for the zone the player is standing in.
           Auto-dismisses on no-action zones (park / society / pond). */}
       <ZoneActionBanner
         scene={scene}
-        onOpenMailbox={() => setActiveModal('mailbox')}
-        onOpenOffice={() => setActiveModal('office')}
-        onOpenBreeding={() => setBreedingOpen(true)}
+        onOpenMailbox={spectator ? () => {} : () => setActiveModal('mailbox')}
+        onOpenOffice={spectator ? () => {} : () => setActiveModal('office')}
+        onOpenBreeding={spectator ? () => {} : () => setBreedingOpen(true)}
       />
 
       {/* "Press E to interact" prompt — only when in an interactive zone

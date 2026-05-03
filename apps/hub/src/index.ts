@@ -16,6 +16,7 @@ import { initDB } from './db'
 import { PetSupervisor } from './PetSupervisor'
 import { registerGlobalChat } from './global-chat'
 import type { Zone } from 'shared-types'
+import { battleIdToEscrowKey } from 'contracts-sdk'
 import { connectKeeperHub } from 'keeperhub/client.js'
 
 // ── Shared event bus (pet workers → SSE clients) ─────────────────────────────
@@ -398,23 +399,54 @@ app.post<{ Body: { petId: number; subscriptionId: number } }>(
 )
 
 // ── Battle: start ─────────────────────────────────────────────────────────────
-app.post<{ Body: { petAId: number; petBId: number; stakeAmount: string } }>(
+app.post<{ Body: { petAId: number; petBId: number; stakeAmount: string; format?: string } }>(
   '/api/battle/start',
   (req, reply) => {
     const { petAId, petBId, stakeAmount } = req.body
-    type PetRow = { peer_id: string | null; name: string; wallet_address: string }
+    const format = req.body.format ?? 'debate'
+    type PetRow = { peer_id: string | null; name: string; ens_name: string | null; wallet_address: string }
     const petA = db.prepare('SELECT peer_id, name, wallet_address FROM pets WHERE token_id = ?').get(petAId) as PetRow | undefined
-    const petB = db.prepare('SELECT peer_id, name, wallet_address FROM pets WHERE token_id = ?').get(petBId) as PetRow | undefined
-    if (!petA?.peer_id || !petB?.peer_id) return reply.status(400).send({ error: 'Pets not ready' })
+    const petB = db.prepare('SELECT peer_id, name, ens_name, wallet_address FROM pets WHERE token_id = ?').get(petBId) as PetRow | undefined
+    if (!petA?.peer_id || !petB?.peer_id || !supervisor.hasWorker(petAId) || !supervisor.hasWorker(petBId)) {
+      return reply.status(400).send({ error: 'Pets not ready' })
+    }
 
-    const judges = db.prepare(
-      'SELECT token_id, peer_id FROM pets WHERE token_id NOT IN (?, ?) AND peer_id IS NOT NULL LIMIT 3'
-    ).all(petAId, petBId) as Array<{ token_id: number; peer_id: string }>
+    const judgeCandidates = db.prepare(
+      'SELECT token_id, name, ens_name, peer_id FROM pets WHERE token_id NOT IN (?, ?) AND peer_id IS NOT NULL LIMIT 1'
+    ).all(petAId, petBId) as Array<{ token_id: number; name: string | null; ens_name: string | null; peer_id: string }>
+    const judges = judgeCandidates.filter(j => supervisor.hasWorker(j.token_id)).slice(0, 1)
 
     const battleId = `battle-${randomBytes(8).toString('hex')}`
+    db.prepare(
+      'INSERT OR IGNORE INTO battles (id, pet_a, pet_b, stake, format, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).run(battleId, petAId, petBId, stakeAmount, format, 'active', Date.now())
+    supervisor.recordBattleEvent(
+      battleId,
+      'matched',
+      `${petA.name} matched with ${petB.name} for ${format}. ${stakeAmount} USDC stake selected.`,
+      petAId,
+      {
+        track: 'Gensyn AXL + BattleEscrow + ENS',
+        stakeAmount,
+        format,
+        opponentPetId: petBId,
+        judgePetIds: judges.map(j => j.token_id),
+      },
+    )
+    supervisor.recordBattleEvent(
+      battleId,
+      'judges',
+      judges.length > 0
+        ? `Judge selected: ${judges[0].ens_name ?? judges[0].name ?? `pet-${judges[0].token_id}`}.`
+        : 'No judge pet available; battle will fall back to timeout/tie handling.',
+      undefined,
+      { judgeCount: judges.length },
+    )
+
     supervisor.broadcast(petAId, {
       type:        'battle-start',
       battleId,
+      format,
       myWallet:    petA.wallet_address,
       withPetId:   petBId,
       withPeerId:  petB.peer_id,
@@ -423,7 +455,187 @@ app.post<{ Body: { petAId: number; petBId: number; stakeAmount: string } }>(
       stakeAmount,
       judges:      judges.map(j => ({ petId: j.token_id, peerId: j.peer_id })),
     })
-    return { ok: true, battleId }
+    return { ok: true, battleId, escrowBattleKey: battleIdToEscrowKey(battleId) }
+  },
+)
+
+/// Active battles this pet is part of (initiator or opponent). Lets the
+/// opponent open the arena with the same `battleId` to stake without re-queuing.
+app.get<{ Querystring: { petId: string } }>(
+  '/api/battle/pending-for-pet',
+  (req, reply) => {
+    const raw = req.query.petId
+    const petId = typeof raw === 'string' ? Number(raw) : Number.NaN
+    if (!Number.isFinite(petId) || petId <= 0) {
+      return reply.status(400).send({ error: 'petId required' })
+    }
+    type Row = {
+      id: string
+      pet_a: number
+      pet_b: number
+      stake: string
+      format: string
+      status: string
+      created_at: number
+    }
+    const rows = db
+      .prepare(
+        `SELECT id, pet_a, pet_b, stake, format, status, created_at
+         FROM battles
+         WHERE status = 'active' AND (pet_a = ? OR pet_b = ?)
+         ORDER BY created_at DESC`,
+      )
+      .all(petId, petId) as Row[]
+
+    type NameRow = { name: string | null; ens_name: string | null }
+    const nameFor = (tid: number) =>
+      db.prepare('SELECT name, ens_name FROM pets WHERE token_id = ?').get(tid) as NameRow | undefined
+
+    const battles = rows.map((r) => {
+      const isA = r.pet_a === petId
+      const opponentPetId = isA ? r.pet_b : r.pet_a
+      const opp = nameFor(opponentPetId)
+      const stakeNum = Number.parseFloat(r.stake)
+      const stakeUsdc = Number.isFinite(stakeNum) ? stakeNum : 0
+      return {
+        battleId:        r.id,
+        escrowBattleKey: battleIdToEscrowKey(r.id),
+        /** BattleEscrow on-chain pet1 is always Hub `pet_a` (who queued). */
+        escrowPet1TokenId: r.pet_a,
+        yourPetId:       petId,
+        opponentPetId,
+        opponentName:    opp?.name ?? `pet-${opponentPetId}`,
+        opponentEnsName: opp?.ens_name ?? `${opp?.name ?? `pet-${opponentPetId}`}.tama.eth`,
+        role:            isA ? ('initiator' as const) : ('opponent' as const),
+        stakeUsdc,
+        format:          r.format,
+      }
+    })
+
+    return { battles }
+  },
+)
+
+app.get<{ Querystring: { battleId: string } }>(
+  '/api/battle/status',
+  async (req, reply) => {
+    const { battleId } = req.query
+    if (!battleId) return reply.status(400).send({ error: 'battleId required' })
+    type BattleRow = { id: string; pet_a: number; pet_b: number; stake: string; format: string; status: string; winner: number | null; judges: string | null; payouts: string | null; created_at: number; settled_at: number | null }
+    const row = db.prepare('SELECT * FROM battles WHERE id = ?').get(battleId) as BattleRow | undefined
+    if (!row) return reply.status(404).send({ error: 'Battle not found' })
+    type EventRow = { phase: string; detail: string; pet_id: number | null; metadata: string | null; created_at: number }
+    const eventRows = db.prepare(
+      'SELECT phase, detail, pet_id, metadata, created_at FROM battle_events WHERE battle_id = ? ORDER BY created_at ASC',
+    ).all(battleId) as EventRow[]
+    const pets = db.prepare('SELECT token_id, name, ens_name FROM pets').all() as Array<{ token_id: number; name: string | null; ens_name: string | null }>
+    const petNames = new Map(pets.map(p => [p.token_id, p.ens_name ?? p.name ?? `pet-${p.token_id}`]))
+    const judges = row.judges ? JSON.parse(row.judges) as Array<{ petId: number; score: number; reasoning: string }> : []
+    const opponentOfWinner = row.winner === row.pet_a ? row.pet_b : row.pet_a
+    const judgeVotes = judges.map(j => ({
+      judge: petNames.get(j.petId) ?? `pet-${j.petId}`,
+      votedFor: j.score === 1
+        ? (petNames.get(row.winner ?? 0) ?? `pet-${row.winner}`)
+        : (petNames.get(opponentOfWinner) ?? `pet-${opponentOfWinner}`),
+      reasoning: j.reasoning,
+    }))
+    const events = eventRows.map(e => {
+      let metadata: Record<string, unknown> = {}
+      try { metadata = JSON.parse(e.metadata ?? '{}') as Record<string, unknown> } catch {}
+      return {
+        at: e.created_at - row.created_at,
+        phase: e.phase,
+        detail: e.detail,
+        petId: e.pet_id,
+        petName: e.pet_id ? (petNames.get(e.pet_id) ?? `pet-${e.pet_id}`) : null,
+        metadata,
+        petWon: row.winner != null ? row.winner === row.pet_a : undefined,
+      }
+    })
+    const current = events[events.length - 1] ?? {
+      at: 0,
+      phase: 'matched',
+      detail: 'Battle matched. Waiting for first AXL event.',
+      petId: null,
+      petName: null,
+      metadata: {},
+      petWon: undefined,
+    }
+    const payouts = row.payouts ? JSON.parse(row.payouts) : []
+    const revEvents = [...events].reverse()
+    const metaHit = revEvents.find(
+      e => typeof e.metadata.settlementTxHash === 'string' || typeof e.metadata.txHash === 'string',
+    )
+    const payoutTxHash =
+      typeof metaHit?.metadata.settlementTxHash === 'string'
+        ? metaHit.metadata.settlementTxHash
+        : typeof metaHit?.metadata.txHash === 'string'
+          ? metaHit.metadata.txHash
+          : null
+
+    const verdictRow = [...eventRows].reverse().find(e => e.phase === 'verdict' || e.phase === 'error')
+    let verdictMeta: Record<string, unknown> = {}
+    try {
+      verdictMeta = JSON.parse(verdictRow?.metadata ?? '{}') as Record<string, unknown>
+    } catch {}
+    const settlementError =
+      typeof verdictMeta.settlementError === 'string' ? verdictMeta.settlementError : null
+    const workerOnChainStatus =
+      typeof verdictMeta.onChainStatus === 'string' ? verdictMeta.onChainStatus : null
+
+    let escrowOnChain: { pet1Staked: boolean; pet2Staked: boolean; settled: boolean } | null = null
+    const sepoliaRpc = process.env.SEPOLIA_RPC_URL
+    if (sepoliaRpc) {
+      try {
+        const { createPublicClient, http } = await import('viem')
+        const { sepolia } = await import('viem/chains')
+        const { battleIdToEscrowKey, ADDRESSES_SEPOLIA, BattleEscrowABI, parseBattleEscrowBattlesRead } = await import('contracts-sdk')
+        const client = createPublicClient({ chain: sepolia, transport: http(sepoliaRpc) })
+        const key = battleIdToEscrowKey(battleId)
+        const raw = await client.readContract({
+          address:      ADDRESSES_SEPOLIA.BattleEscrow,
+          abi:          BattleEscrowABI,
+          functionName: 'battles',
+          args:         [key],
+        })
+        const br = parseBattleEscrowBattlesRead(raw)
+        if (br && br.pet1 !== '0x0000000000000000000000000000000000000000') {
+          escrowOnChain = {
+            pet1Staked: br.pet1Staked,
+            pet2Staked: br.pet2Staked,
+            settled:    br.settled,
+          }
+        }
+      } catch {
+        /* RPC flake — omit escrowOnChain */
+      }
+    }
+
+    return {
+      battleId:  row.id,
+      petA:      row.pet_a,
+      petB:      row.pet_b,
+      stake:     row.stake,
+      format:    row.format,
+      status:    row.status,
+      winner:    row.winner ?? null,
+      judges,
+      judgeVotes,
+      payouts,
+      createdAt: row.created_at,
+      settledAt: row.settled_at ?? null,
+      elapsedMs: (row.settled_at ?? Date.now()) - row.created_at,
+      events,
+      current,
+      finished: row.status !== 'active',
+      escrowSettledOnChain: row.status === 'settled',
+      escrowOnChain,
+      payoutTxHash,
+      settlementTxHash: payoutTxHash,
+      settlementError,
+      workerOnChainStatus,
+      source: 'hub',
+    }
   },
 )
 
@@ -730,8 +942,8 @@ async function main() {
     for (const { token_id } of livePets) {
       if (positions.has(token_id)) continue
       positions.set(token_id, {
-        x: 60 + Math.random() * 360,    // 60..420 — inside park, away from edges
-        y: 60 + Math.random() * 360,
+        x: 520 + Math.random() * 360,   // 520..880 — inside park rect (500-900)
+        y: 480 + Math.random() * 270,   // 480..750 — inside park rect (460-768)
         zone: 'park',
       })
       seeded++
@@ -770,8 +982,8 @@ async function main() {
       if (convoUntil > now) continue
       if (convoUntil > 0) inConversation.delete(petId)
 
-      const nx = clamp(pos.x + (Math.random() - 0.5) * 40, 40, 440)
-      const ny = clamp(pos.y + (Math.random() - 0.5) * 40, 40, 440)
+      const nx = clamp(pos.x + (Math.random() - 0.5) * 40, 520, 880)
+      const ny = clamp(pos.y + (Math.random() - 0.5) * 40, 480, 750)
       positions.set(petId, { x: nx, y: ny, zone: pos.zone })
     }
   }
@@ -807,6 +1019,10 @@ async function main() {
   // Pets currently engaged in a Hub-brokered conversation. Both directions of
   // the pair share the same entry; cleared when bubble lands or proximity breaks.
   const activeChats = new Map<number, number>()  // petId -> partnerPetId
+  const chatTurnCount = new Map<string, number>() // pairKey -> turns sent
+  const MAX_TURNS = 4
+
+  function pairKey(a: number, b: number) { return `${Math.min(a,b)}-${Math.max(a,b)}` }
 
   function distanceBetween(a: number, b: number): number | null {
     const pa = positions.get(a)
@@ -818,13 +1034,15 @@ async function main() {
   function endChat(a: number, b: number) {
     if (activeChats.get(a) === b) activeChats.delete(a)
     if (activeChats.get(b) === a) activeChats.delete(b)
+    chatTurnCount.delete(pairKey(a, b))
     // Tell both workers to abort any in-flight reply they were about to send
     supervisor.broadcast(a, { type: 'chat-end', withPetId: b })
     supervisor.broadcast(b, { type: 'chat-end', withPetId: a })
   }
 
   // Gate every chat-out IPC: if the speaker is no longer paired with the
-  // listener, or they've drifted past PROXIMITY_BREAK_PX, drop the bubble.
+  // listener, they've drifted past PROXIMITY_BREAK_PX, or the pair has hit
+  // MAX_TURNS, drop the bubble.
   supervisor.setChatGate((fromId, toId) => {
     const partner = activeChats.get(fromId)
     if (partner !== toId) return false
@@ -834,6 +1052,14 @@ async function main() {
       endChat(fromId, toId)
       console.log(`[Broker] Chat ended pet ${fromId}<->${toId} drift=${d.toFixed(0)}px`)
       return false
+    }
+    const key = pairKey(fromId, toId)
+    const turns = (chatTurnCount.get(key) ?? 0) + 1
+    chatTurnCount.set(key, turns)
+    if (turns >= MAX_TURNS) {
+      endChat(fromId, toId)
+      console.log(`[Broker] Chat capped pet ${fromId}<->${toId} after ${turns} turns`)
+      return true  // allow this last message through, end fires after
     }
     return true
   })

@@ -7,6 +7,8 @@ interface PixelCardProps extends Omit<HTMLAttributes<HTMLDivElement>, 'title'> {
   title?: ReactNode
   /** Extra content for the card header — e.g. icons, tags */
   headerRight?: ReactNode
+  /** Classes applied to the body wrapper (below the title bar). Default: `p-4` */
+  bodyClassName?: string
 }
 
 const variantBorder: Record<Variant, string> = {
@@ -22,6 +24,7 @@ export function PixelCard({
   variant = 'default',
   title,
   headerRight,
+  bodyClassName,
   className = '',
   children,
   ...rest
@@ -36,14 +39,14 @@ export function PixelCard({
       {...rest}
     >
       {title !== undefined && (
-        <div className="flex items-center justify-between border-b-4 border-[color:var(--color-bg-deep)] bg-[color:var(--color-bg-deep)] px-4 py-2">
+        <div className="flex shrink-0 items-center justify-between border-b-4 border-[color:var(--color-bg-deep)] bg-[color:var(--color-bg-deep)] px-4 py-2">
           <h3 className="font-[family-name:var(--font-pixel)] text-xs tracking-widest uppercase text-[color:var(--color-ink)]">
             {title}
           </h3>
           {headerRight}
         </div>
       )}
-      <div className="p-4">{children}</div>
+      <div className={bodyClassName ?? 'p-4'}>{children}</div>
     </div>
   )
 }

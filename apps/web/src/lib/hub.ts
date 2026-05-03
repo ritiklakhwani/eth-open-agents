@@ -53,6 +53,8 @@ export async function fetchAllPets(): Promise<HubPetRow[]> {
 interface HubFetchOpts {
   method?: 'GET' | 'POST'
   body?: unknown
+  /** Override default Hub timeout (e.g. battle status needs a longer read). */
+  timeoutMs?: number
 }
 
 /// Fire a Hub request. Returns parsed JSON on success, null on failure/timeout.
@@ -60,12 +62,13 @@ export async function callHub<T = unknown>(
   path: string,
   opts: HubFetchOpts = {},
 ): Promise<T | null> {
+  const timeoutMs = opts.timeoutMs ?? HUB_TIMEOUT_MS
   try {
     const res = await fetch(`${HUB_URL}${path}`, {
       method:  opts.method ?? 'POST',
       headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
       body:    opts.body ? JSON.stringify(opts.body) : undefined,
-      signal:  AbortSignal.timeout(HUB_TIMEOUT_MS),
+      signal:  AbortSignal.timeout(timeoutMs),
       cache:   'no-store',
     })
     if (!res.ok) return null

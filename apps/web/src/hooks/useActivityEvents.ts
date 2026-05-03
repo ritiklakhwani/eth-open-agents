@@ -7,7 +7,9 @@
 //   { type: 'subscription-proposals', petId, proposals, timestamp }
 //   { type: 'subscription-created',   petId, workflowId, subscriptionId, timestamp }
 //   { type: 'mailbox-queued',         petId, workflowId, toPetId, timestamp }
-//   { type: 'battle-result',          petId, battleId, winner, text, timestamp }
+//   { type: 'battle-progress',        petId, battleId, phase, detail, timestamp }
+//   { type: 'battle-result',          petId, battleId, winner, text,
+//                                     createTxHash?, settlementTxHash?, onChainStatus?, settlementError? }
 //
 // Modals subscribe with a (petId, type) filter and re-render when matching
 // events arrive. Connection is shared per-petId via React state (one socket
@@ -22,6 +24,7 @@ export type ActivityType =
   | 'subscription-proposals'
   | 'subscription-created'
   | 'mailbox-queued'
+  | 'battle-progress'
   | 'battle-result'
 
 export interface ActivityEvent<T extends ActivityType = ActivityType> {
@@ -34,8 +37,15 @@ export interface ActivityEvent<T extends ActivityType = ActivityType> {
   subscriptionId?: number
   toPetId?: number
   battleId?: string
+  phase?: string
+  detail?: string
+  metadata?: Record<string, unknown>
   winner?: number
   text?: string
+  createTxHash?: string
+  settlementTxHash?: string
+  onChainStatus?: string
+  settlementError?: string
 }
 
 export interface UseActivityEventsResult {

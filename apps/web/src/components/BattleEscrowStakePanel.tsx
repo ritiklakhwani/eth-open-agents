@@ -42,7 +42,7 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
   const { address, isConnected } = useAccount()
   const chainId = useChainId()
   const publicClient = usePublicClient()
-  const { writeContractAsync, isPending, error: writeError, reset: resetWrite } = useWriteContract()
+  const { writeContractAsync, isPending, reset: resetWrite } = useWriteContract()
 
   const chainPet1TokenId = match.escrowPet1TokenId ?? match.petId
   const chainPet2TokenId =
@@ -67,6 +67,7 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
   const [approveTx, setApproveTx] = useState<Hash | null>(null)
   const [stakeTx, setStakeTx] = useState<Hash | null>(null)
   const [stepError, setStepError] = useState<string | null>(null)
+  const [stepErrorTone, setStepErrorTone] = useState<'warn' | 'error'>('error')
   /** Sepolia RPC rate limit (e.g. Alchemy 429) — poll less aggressively and warn user. */
   const [rpcWarn, setRpcWarn] = useState<string | null>(null)
 
@@ -166,6 +167,7 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
     setApproveTx(null)
     setStakeTx(null)
     setStepError(null)
+    setStepErrorTone('error')
   }, [signingWallet])
 
   const walletsMatchEscrow =
@@ -194,6 +196,7 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
   async function runApprove() {
     if (!publicClient || !signingWallet || !correctChain) return
     setStepError(null)
+    setStepErrorTone('error')
     resetWrite()
     try {
       const allowance = await publicClient.readContract({
@@ -220,13 +223,16 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
       await publicClient.waitForTransactionReceipt({ hash })
       setApproveTx(hash)
     } catch (e) {
-      setStepError(formatRpcError(e))
+      const formatted = formatRpcError(e)
+      setStepError(formatted.message)
+      setStepErrorTone(formatted.tone)
     }
   }
 
   async function runFundWallet() {
     if (!publicClient || !signingWallet || !correctChain) return
     setStepError(null)
+    setStepErrorTone('error')
     resetWrite()
     try {
       const hash = await writeContractAsync({
@@ -238,13 +244,16 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
       await publicClient.waitForTransactionReceipt({ hash })
       setFundTx(hash)
     } catch (e) {
-      setStepError(formatRpcError(e))
+      const formatted = formatRpcError(e)
+      setStepError(formatted.message)
+      setStepErrorTone(formatted.tone)
     }
   }
 
   async function runStake() {
     if (!publicClient || !signingWallet || !correctChain) return
     setStepError(null)
+    setStepErrorTone('error')
     resetWrite()
     try {
       const data = encodeFunctionData({
@@ -262,12 +271,14 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
       setStakeTx(hash)
       void pollBattle()
     } catch (e) {
-      setStepError(formatRpcError(e))
+      const formatted = formatRpcError(e)
+      setStepError(formatted.message)
+      setStepErrorTone(formatted.tone)
     }
   }
 
   return (
-    <PixelCard variant="default" title="ON-CHAIN STAKE (BATTLE ESCROW)">
+    <PixelCard variant="warm" title="STEP 1 — FUND, APPROVE, STAKE">
       {(!pet1Staked || !pet2Staked) && (
         <div className="mb-3 border-2 border-[color:var(--color-yellow)] bg-[color:var(--color-bg-deep)] p-2 sm:p-3">
           <p className="font-[family-name:var(--font-pixel-readable)] text-sm text-[color:var(--color-ink)]">
@@ -279,9 +290,8 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
         </div>
       )}
       <p className="font-[family-name:var(--font-pixel-readable)] text-sm text-[color:var(--color-ink-mid)] mb-3">
-        Each pet wallet must stake {match.stakeUsdc} USDC on Sepolia. Connect the wallet that{' '}
-        <strong>owns your pet NFT</strong>, fund that pet&apos;s smart wallet from MetaMask, then sign approve + stake
-        on the pet wallet. The other player does the same from their account (same battle id / escrow key).
+        Each side puts in {match.stakeUsdc} USDC. Connect the wallet that <strong>owns your pet NFT</strong>, fund the
+        pet wallet, approve USDC, then stake into BattleEscrow.
       </p>
 
       {loadError && (
@@ -314,17 +324,13 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
 
       <div className="grid gap-2 mb-3 font-[family-name:var(--font-pixel-readable)] text-xs text-[color:var(--color-ink)]">
         <div className="flex justify-between gap-2">
-          <span className="text-[color:var(--color-ink-low)]">Battle id</span>
+          <span className="text-[color:var(--color-ink-low)]">Battle</span>
           <span className="truncate font-mono">{match.battleId}</span>
-        </div>
-        <div className="flex justify-between gap-2">
-          <span className="text-[color:var(--color-ink-low)]">Escrow key</span>
-          <span className="truncate font-mono text-[10px]">{escrowKey}</span>
         </div>
         <div className="flex justify-between gap-2">
           <span className="text-[color:var(--color-ink-low)]">Registration</span>
           <span className={battleExists ? 'text-[color:var(--color-lime)]' : 'text-[color:var(--color-yellow)]'}>
-            {battleExists ? 'createBattle on-chain' : 'waiting for createBattle…'}
+            {battleExists ? 'Ready on-chain' : 'Waiting for createBattle…'}
           </span>
         </div>
         {battleExists && !walletsMatchEscrow && (
@@ -333,11 +339,11 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
           </p>
         )}
         <div className="flex justify-between gap-2">
-          <span className="text-[color:var(--color-ink-low)]">Pet #{chainPet1TokenId} wallet (on-chain pet1)</span>
+          <span className="text-[color:var(--color-ink-low)]">Pet #{chainPet1TokenId} wallet</span>
           <span className="truncate font-mono">{pet1Wallet ? shortAddr(pet1Wallet) : '—'}</span>
         </div>
         <div className="flex justify-between gap-2">
-          <span className="text-[color:var(--color-ink-low)]">Pet #{chainPet2TokenId} wallet (on-chain pet2)</span>
+          <span className="text-[color:var(--color-ink-low)]">Pet #{chainPet2TokenId} wallet</span>
           <span className="truncate font-mono">{pet2Wallet ? shortAddr(pet2Wallet) : '—'}</span>
         </div>
         <div className="flex justify-between gap-2">
@@ -350,7 +356,7 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
         </div>
         {signingSlot && (
           <div className="flex justify-between gap-2 text-[color:var(--color-cyan)]">
-            <span>Your role</span>
+            <span>Your side</span>
             <span className="uppercase">{signingSlot}</span>
           </div>
         )}
@@ -415,9 +421,12 @@ export function BattleEscrowStakePanel({ match }: BattleEscrowStakePanelProps) {
         </p>
       )}
 
-      {(stepError || writeError?.message) && (
-        <p className="font-[family-name:var(--font-pixel)] text-xs text-[color:var(--color-red)]">
-          ! {stepError ?? writeError?.message}
+      {stepError && (
+        <p
+          className="font-[family-name:var(--font-pixel)] text-xs"
+          style={{ color: stepErrorTone === 'warn' ? 'var(--color-yellow)' : 'var(--color-red)' }}
+        >
+          ! {stepError}
         </p>
       )}
 
@@ -464,13 +473,33 @@ function shortAddr(s: string): string {
   return `${s.slice(0, 8)}…${s.slice(-6)}`
 }
 
-function formatRpcError(e: unknown): string {
+function formatRpcError(e: unknown): { message: string; tone: 'warn' | 'error' } {
   const msg = e instanceof Error ? e.message : String(e)
-  if (msg.includes('429') || msg.toLowerCase().includes('too many requests')) {
-    return (
-      'RPC rate limited (429). Your transaction may still succeed — check Etherscan. ' +
-      'Wait 30s, use one tab, or set NEXT_PUBLIC_SEPOLIA_RPC_URL to https://ethereum-sepolia-rpc.publicnode.com in .env.local.'
-    )
+  const lower = msg.toLowerCase()
+  if (
+    lower.includes('user rejected') ||
+    lower.includes('user denied') ||
+    lower.includes('rejected the request') ||
+    lower.includes('request rejected') ||
+    lower.includes('action_rejected')
+  ) {
+    return {
+      message: 'Transaction cancelled in wallet. Nothing was sent.',
+      tone: 'warn',
+    }
   }
-  return msg
+  if (msg.includes('429') || msg.toLowerCase().includes('too many requests')) {
+    return {
+      message:
+        'RPC rate limited (429). Your transaction may still succeed — check Etherscan. Wait 30s or retry with one tab open.',
+      tone: 'warn',
+    }
+  }
+  if (lower.includes('insufficient funds')) {
+    return {
+      message: 'Not enough balance for this transaction. Check gas and token funds, then try again.',
+      tone: 'error',
+    }
+  }
+  return { message: msg.split('\n')[0].slice(0, 220), tone: 'error' }
 }

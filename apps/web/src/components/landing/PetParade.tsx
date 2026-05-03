@@ -23,13 +23,13 @@ const PARADE_SPRITES = [
 export function PetParade() {
   return (
     <div
-      className="pointer-events-none absolute inset-x-0 bottom-[8%] h-[88px] overflow-hidden"
+      className="pointer-events-none absolute inset-x-0 bottom-0 h-[170px] overflow-hidden"
       aria-hidden="true"
     >
       {PARADE_SPRITES.map((src, i) => (
         <div
           key={src}
-          className="absolute bottom-0 animate-parade"
+          className="absolute bottom-[88px] animate-parade"
           style={{
             // Spread the 8 pets evenly through the 36s loop so the screen
             // always has 3-4 pets visible at any moment.
@@ -57,6 +57,14 @@ export function PetParade() {
           </div>
         </div>
       ))}
+      <div
+        className="absolute bottom-0 inset-x-0 h-[88px]"
+        style={{
+          backgroundImage: 'linear-gradient(rgba(20, 50, 120, 0.45), rgba(20, 50, 120, 0.45)), url(https://img.freepik.com/free-photo/blank-concrete-white-wall-texture-background_1017-15560.jpg?semt=ais_hybrid&w=740&q=80)',
+          backgroundSize: 'auto, auto 100%',
+          backgroundRepeat: 'no-repeat, repeat-x',
+        }}
+      />
     </div>
   )
 }

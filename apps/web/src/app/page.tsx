@@ -77,7 +77,7 @@ export default function Home() {
         <div
           className="absolute inset-0 bg-cover bg-center pixelated"
           style={{
-            backgroundImage:    'url(/world-bg.png)',
+            backgroundImage:    'url(/landing.png)',
             // Sit the visible street near the bottom of the hero so the pet
             // parade lands on actual cobblestones rather than empty sky.
             backgroundPosition: 'center 70%',
@@ -99,10 +99,10 @@ export default function Home() {
         <header className="relative z-20 flex items-center justify-between px-6 py-5 md:px-12">
           <Link href="/" className="flex items-baseline gap-2 group">
             <span className="font-[family-name:var(--font-pixel)] text-xl md:text-2xl text-[color:var(--color-pink)] group-hover:text-[color:var(--color-pink-hi)] transition-colors leading-none">
-              PET
+              TAMA
             </span>
             <span className="font-[family-name:var(--font-pixel)] text-xl md:text-2xl text-[color:var(--color-yellow)] group-hover:text-white transition-colors leading-none">
-              CITY
+              TOWN
             </span>
           </Link>
 
@@ -124,37 +124,37 @@ export default function Home() {
         </header>
 
         {/* Centered hero copy + CTAs */}
-        <div className="relative z-20 flex flex-col items-center justify-center text-center px-6 pt-10 md:pt-20">
-          <p className="font-[family-name:var(--font-pixel)] text-[10px] md:text-xs tracking-[0.4em] text-[color:var(--color-cyan)] mb-5 animate-blink">
-            ★ ETHGLOBAL OPEN AGENTS ★
-          </p>
+        <div className="relative z-20 flex flex-col items-center justify-center text-center px-6 pt-24 md:pt-36">
+          <div className="inline-flex flex-col mb-10">
+            <h1 className="font-[family-name:var(--font-pixel)] text-2xl md:text-4xl lg:text-5xl text-stroke-navy leading-tight mb-6 whitespace-nowrap">
+              Explore. Battle. Breed.
+            </h1>
 
-          <h1 className="font-[family-name:var(--font-pixel)] text-3xl md:text-6xl lg:text-7xl text-stroke-navy leading-tight mb-6 max-w-5xl">
-            Adopt. Raise.<br className="md:hidden" /> Earn Trust.
-          </h1>
+            <p
+              className="font-[family-name:var(--font-pixel-readable)] text-xl md:text-2xl text-white leading-snug px-6 py-4 rounded mb-6"
+              style={{ background: 'rgba(10, 12, 46, 0.55)', backdropFilter: 'blur(4px)' }}
+            >
+              Enter the world of Pet Agent Society, a social multiplayer game<br />
+              where you collect, breed, and socialize with unique pixel-art pets.<br />
+              Explore a vibrant night town, play minigames, and meet other agents.
+            </p>
 
-          <p className="font-[family-name:var(--font-pixel-readable)] text-xl md:text-2xl text-[color:var(--color-ink)] mb-2 max-w-2xl text-stroke-navy-sm">
-            The trust layer for AI agents.
-          </p>
-          <p className="font-[family-name:var(--font-pixel-readable)] text-base md:text-lg text-[color:var(--color-ink-mid)] mb-10 max-w-2xl text-stroke-navy-sm">
-            Your pet lives onchain — chats, breeds, sends gifts,<br className="hidden md:block" /> earns ENS reputation. Powered by 5 sponsor stacks.
-          </p>
-
-          {/* Three CTAs — yellow ADOPT, cyan ENTER, ghost CREDITS */}
-          <div className="flex flex-col sm:flex-row gap-4 items-center justify-center">
-            <PixelButton variant="primary" size="lg" onClick={() => setShowAdopt(true)}>
-              ★ ADOPT A PET
-            </PixelButton>
-            <Link href="/world">
-              <PixelButton variant="secondary" size="lg">
-                ▶ ENTER PETCITY
+            {/* Three CTAs spread across the full headline width */}
+            <div className="flex flex-row items-center justify-between">
+              <PixelButton variant="primary" size="lg" onClick={() => setShowAdopt(true)}>
+                ★ ADOPT A PET
               </PixelButton>
-            </Link>
-            <a href="#whats-inside">
-              <PixelButton variant="ghost" size="lg">
-                ↓ DISCOVER
-              </PixelButton>
-            </a>
+              <Link href="/world">
+                <PixelButton variant="secondary" size="lg">
+                  ▶ ENTER TAMATOWN
+                </PixelButton>
+              </Link>
+              <a href="#whats-inside">
+                <PixelButton variant="ghost" size="lg">
+                  ↓ DISCOVER
+                </PixelButton>
+              </a>
+            </div>
           </div>
         </div>
 

@@ -140,7 +140,7 @@ export class PetSupervisor {
         const fromId = m.petId   as number
         const toId   = m.toPetId as number
         if (this.chatGate && !this.chatGate(fromId, toId)) {
-          console.log(`[Chat] Pet ${fromId} -> Pet ${toId} dropped (out of proximity)`)
+          // Specific reason logged inside the gate (no-longer-paired / drift / no-position).
           return
         }
         const text = String(m.text ?? '').slice(0, 80)

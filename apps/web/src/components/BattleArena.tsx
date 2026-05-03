@@ -174,13 +174,13 @@ export function BattleArena({ open, onClose, petId }: BattleArenaProps) {
                     key={f.id}
                     onClick={() => setFormat(f.id)}
                     className={[
-                      'cursor-pointer text-left border-4 p-3 transition-none',
+                      'cursor-pointer text-left border p-3 transition-colors',
                       active
-                        ? 'bg-[color:var(--color-bg-hi)] border-[color:var(--color-pink)]'
-                        : 'bg-[color:var(--color-bg-mid)] border-[color:var(--color-border)] hover:bg-[color:var(--color-bg-hi)]',
+                        ? 'bg-[color:var(--color-yellow)]/10 border-[color:var(--color-yellow)]/60'
+                        : 'bg-[rgba(10,12,46,0.55)] border-[color:var(--color-yellow)]/15 hover:border-[color:var(--color-yellow)]/35 hover:bg-[rgba(10,12,46,0.75)]',
                     ].join(' ')}
                   >
-                    <div className="font-[family-name:var(--font-pixel)] text-sm text-[color:var(--color-pink)] mb-1">
+                    <div className="font-[family-name:var(--font-pixel)] text-sm text-[color:var(--color-yellow)] mb-1">
                       {f.label}
                     </div>
                     <div className="font-[family-name:var(--font-pixel-readable)] text-sm text-[color:var(--color-ink-mid)]">

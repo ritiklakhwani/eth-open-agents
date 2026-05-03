@@ -47,6 +47,11 @@ export class WorldScene extends Phaser.Scene {
   private lastBroadcast = 0
   private readonly BROADCAST_HZ = 10 // 10 broadcasts per second
 
+  // Walking polish — per-pet dust spawn timer + last-position tracker so we
+  // only emit dust when a pet actually moved (not when standing still).
+  private dustEmitTimers = new Map<number, number>()
+  private prevPositions  = new Map<number, { x: number; y: number }>()
+
   constructor() {
     super('WorldScene')
   }
@@ -62,6 +67,11 @@ export class WorldScene extends Phaser.Scene {
     this.load.image('tiny-town', '/tilesets/tiny-town/tilemap.png')
     // AI-generated cozy night-town background (1024x1024, scaled to world).
     this.load.image('world-bg', '/world-bg.png')
+    // Partner logos — keyed by the `partner` property on each partner zone.
+    this.load.image('logo-gensyn-axl', '/logos/gensyn.png')
+    this.load.image('logo-ens',        '/logos/ens.png')
+    this.load.image('logo-keeperhub',  '/logos/keeperhub.png')
+    this.load.image('logo-0g',         '/logos/0g.png')
   }
 
   create() {
@@ -211,10 +221,11 @@ export class WorldScene extends Phaser.Scene {
     playerBody.setCollideWorldBounds(true)
     if (collisionLayer) this.physics.add.collider(this.player, collisionLayer)
 
-    // Building-body walls intentionally removed — pets walk freely everywhere.
-    // World bounds (set by physics.world.setBounds above) still keep them in
-    // the map. Re-introduce a static group + collider here if collision is
-    // wanted again later.
+    // Building-body walls intentionally removed per user request — pets walk
+    // freely everywhere. World bounds (set above) still keep them in the map.
+    // The shared WALLS constant is preserved in packages/shared-types/walls.ts
+    // for future use; re-add the static-group + collider here when reintroducing
+    // collision with measured-precise rects.
 
     // Camera — follows player by default; trackpad two-finger / mouse-wheel
     // detaches follow and pans freely; pressing any movement key re-attaches.
@@ -298,6 +309,15 @@ export class WorldScene extends Phaser.Scene {
     // Cleanup on scene shutdown
     this.events.once('shutdown', () => this.mp.disconnect())
 
+    // Post-mint breeding ceremony — fired by world/page.tsx after BreedingFlow
+    // completes. Plays hearts at breeding hall → child sprite emerges → walks
+    // to park → parents follow at halfway.
+    this.events.on('breeding-mint-done', (data: {
+      childSpriteUrl: string
+      parentASpriteUrl: string | null
+      parentBSpriteUrl: string | null
+    }) => this.playBreedingMintAnimation(data))
+
     // Async-load the user's own sprite (uploaded photo → OpenAI gpt-image-1
     // pixel-art creature, persisted to /sprites/<hash>.png by the API and
     // referenced via Hub's sprite_url column). The Pet Inspector also reads
@@ -328,7 +348,7 @@ export class WorldScene extends Phaser.Scene {
         const rect = petId === this.petId ? this.player : this.otherPets.get(petId)
         if (!rect) return
         const sprite = this.add.image(rect.x, rect.y, key)
-        sprite.setDisplaySize(28, 28)
+        sprite.setDisplaySize(42, 42)
         sprite.setDepth(50)
         this.petSprites.set(petId, sprite)
         rect.setFillStyle(0x000000, 0)        // hide rectangle fill
@@ -343,6 +363,159 @@ export class WorldScene extends Phaser.Scene {
     } catch (err) {
       console.warn(`[WorldScene] sprite fetch failed for pet ${petId}:`, (err as Error).message)
     }
+  }
+
+  /// Post-mint breeding ceremony. Plays in 3 phases:
+  ///   T+0     hearts burst at breeding hall (1.6s)
+  ///   T+1600  child sprite appears at breeding door, walks toward park
+  ///   T+5600  child arrives at park → both parents emerge together from
+  ///           the breeding door and walk to the park to meet the child
+  private async playBreedingMintAnimation(data: {
+    childSpriteUrl:    string
+    parentASpriteUrl:  string | null
+    parentBSpriteUrl:  string | null
+  }) {
+    // Anchors — derived from world.tmj zone coords.
+    // Breeding zone: (976, 83, 292, 249) — hall body. Door is bottom-center.
+    // Park zone: (635, 485, 395, 283) — fountain area. Destination is the center.
+    const breedingDoor = { x: 1122, y: 332 }   // bottom-center of breeding zone
+    const parkCenter   = { x: 832,  y: 626 }   // center of park zone
+
+    // ── Phase 1: hearts burst at the breeding hall ──────────────────────
+    const heartCount = 14
+    for (let i = 0; i < heartCount; i++) {
+      this.time.delayedCall(i * 110, () => {
+        if (!this.scene.isActive()) return
+        const ox = (Math.random() - 0.5) * 80
+        const oy = (Math.random() - 0.5) * 60
+        const heart = this.add.text(breedingDoor.x + ox, breedingDoor.y - 40 + oy, '♥', {
+          fontSize:  '20px',
+          color:     '#ff6aa1',
+          stroke:    '#0a0c2e',
+          strokeThickness: 2,
+        }).setOrigin(0.5).setDepth(45).setAlpha(0)
+        this.tweens.add({
+          targets: heart,
+          alpha:   { from: 0, to: 1 },
+          y:       heart.y - 50,
+          scale:   { from: 0.6, to: 1.2 },
+          duration: 1400,
+          ease:    'Sine.Out',
+          onComplete: () => {
+            this.tweens.add({
+              targets: heart,
+              alpha:   0,
+              duration: 300,
+              onComplete: () => heart.destroy(),
+            })
+          },
+        })
+      })
+    }
+
+    // ── Helper: load a sprite-image from URL into Phaser, then call cb ──
+    const loadSprite = (key: string, url: string, cb: () => void) => {
+      if (this.textures.exists(key)) { cb(); return }
+      this.load.image(key, url)
+      this.load.once(`filecomplete-image-${key}`, cb)
+      this.load.once('loaderror', (file: { key: string }) => {
+        if (file.key === key) cb()  // proceed even on failure (texture won't render)
+      })
+      this.load.start()
+    }
+
+    const stamp = Date.now()
+    const childKey   = `breed-child-${stamp}`
+    const parentAKey = `breed-parentA-${stamp}`
+    const parentBKey = `breed-parentB-${stamp}`
+
+    // ── Phase 2: spawn child at breeding door, tween to park (1600 → 5600 ms) ──
+    this.time.delayedCall(1600, () => {
+      if (!this.scene.isActive()) return
+      loadSprite(childKey, data.childSpriteUrl, () => {
+        if (!this.scene.isActive()) return
+        const child = this.add.image(breedingDoor.x, breedingDoor.y, childKey)
+          .setDisplaySize(48, 48).setDepth(46)
+          .setAlpha(0)
+        this.tweens.add({ targets: child, alpha: 1, duration: 250 })
+        this.tweens.add({
+          targets:  child,
+          x:        parkCenter.x,
+          y:        parkCenter.y,
+          duration: 4000,
+          ease:     'Sine.InOut',
+          onComplete: () => {
+            // Child arrives — small celebratory bounce, then waits at the
+            // park while the parents emerge and walk over. Fade timed so
+            // child + parents leave together (~T+11100).
+            this.tweens.add({
+              targets: child,
+              y:       child.y - 8,
+              duration: 200,
+              yoyo:     true,
+              repeat:   2,
+            })
+            this.time.delayedCall(5500, () => {
+              this.tweens.add({
+                targets: child,
+                alpha:    0,
+                duration: 400,
+                onComplete: () => child.destroy(),
+              })
+            })
+          },
+        })
+      })
+    })
+
+    // ── Phase 3: parents emerge AFTER child arrives at park (T+5600).
+    // Both come out at the same time, walk together to meet the child.
+    this.time.delayedCall(5600, () => {
+      if (!this.scene.isActive()) return
+      const spawnParent = (
+        spriteUrl: string | null,
+        key:       string,
+        offsetX:   number,
+      ) => {
+        if (!spriteUrl) return
+        loadSprite(key, spriteUrl, () => {
+          if (!this.scene.isActive()) return
+          // Spawn just inside the breeding door with a small lateral offset
+          // so the two parents don't overlap on top of each other.
+          const parent = this.add.image(breedingDoor.x + offsetX * 0.4, breedingDoor.y, key)
+            .setDisplaySize(42, 42).setDepth(45)
+            .setAlpha(0)
+          this.tweens.add({ targets: parent, alpha: 1, duration: 300 })
+          this.tweens.add({
+            targets:  parent,
+            x:        parkCenter.x + offsetX,
+            y:        parkCenter.y + 10,
+            duration: 3500,
+            ease:     'Sine.InOut',
+            onComplete: () => {
+              // Small celebratory bounce when they reach the family.
+              this.tweens.add({
+                targets:  parent,
+                y:        parent.y - 6,
+                duration: 200,
+                yoyo:     true,
+                repeat:   1,
+              })
+              this.time.delayedCall(2000, () => {
+                this.tweens.add({
+                  targets:  parent,
+                  alpha:    0,
+                  duration: 400,
+                  onComplete: () => parent.destroy(),
+                })
+              })
+            },
+          })
+        })
+      }
+      spawnParent(data.parentASpriteUrl, parentAKey, -22)
+      spawnParent(data.parentBSpriteUrl, parentBKey,  22)
+    })
   }
 
   update(_time: number, _delta: number) {
@@ -372,20 +545,39 @@ export class WorldScene extends Phaser.Scene {
     }
 
     // Sync sprite overlays with their underlying rectangles every frame.
-    // The rectangle holds the physics body / camera target; sprite is purely
-    // visual. Drift-free because we update each frame from the rect's pos.
+    // Adds a subtle idle bob (~1.5px sine wave) so pets feel alive even when
+    // standing still. Bob is universal because we don't track per-pet velocity
+    // here; the amplitude is small enough not to look jittery during motion.
+    const idleBob = Math.sin(this.time.now / 280) * 1.5
     for (const [petId, sprite] of this.petSprites) {
       const rect = petId === this.petId ? this.player : this.otherPets.get(petId)
-      if (rect) sprite.setPosition(rect.x, rect.y)
+      if (rect) sprite.setPosition(rect.x, rect.y + idleBob)
+    }
+
+    const isMoving = vx !== 0 || vy !== 0
+
+    // Walking polish — emit dust puffs behind ANY pet that moved this frame.
+    // Detect movement by comparing each pet's current position against last
+    // frame. Each pet has its own throttle timer so the cadence stays the same
+    // (one puff every ~120ms per pet) regardless of how many pets are moving.
+    const now = this.time.now
+    this.maybeEmitDust(this.petId, this.player.x, this.player.y, isMoving, now)
+    for (const [otherId, rect] of this.otherPets) {
+      const prev = this.prevPositions.get(otherId)
+      const moved = prev ? Math.hypot(rect.x - prev.x, rect.y - prev.y) > 1.2 : false
+      this.maybeEmitDust(otherId, rect.x, rect.y, moved, now)
+    }
+    // Snapshot positions for next frame's "did it move" check.
+    this.prevPositions.set(this.petId, { x: this.player.x, y: this.player.y })
+    for (const [otherId, rect] of this.otherPets) {
+      this.prevPositions.set(otherId, { x: rect.x, y: rect.y })
     }
 
     // Only broadcast position when the user is ACTIVELY pressing keys.
     // When all keys release, the Hub stops getting move() events for ~2s
     // and its wander tick takes over — pet auto-wanders around the park.
     // Press a key again, manual control resumes.
-    const isMoving = vx !== 0 || vy !== 0
     if (!isMoving) return
-    const now = this.time.now
     if (now - this.lastBroadcast > 1000 / this.BROADCAST_HZ) {
       this.lastBroadcast = now
       this.mp.move(this.player.x, this.player.y, this.currentZone)
@@ -399,16 +591,17 @@ export class WorldScene extends Phaser.Scene {
     if (z.name === 'pond') return
 
     const labelText = z.label ?? z.name.toUpperCase()
-    // Per-zone anchor — pixel coords against the 1376x768 world-bg.png. Labels
-    // sit on clean ground areas, NOT over buildings, so they are always
-    // readable. Tuned by eyeballing the image.
+    // Per-zone anchor — pixel coords against the 1376x768 world-bg.png.
+    // Tuned to user-measured zone rectangles (Phase 1 measurement pass).
+    // Each label sits on a clean spot ABOVE or BESIDE its zone, never over a
+    // building, so it stays readable. The dark backing pill makes it pop.
     const anchors: Record<string, { cx: number; cy: number }> = {
-      society:  { cx: 380, cy: 188 },   // path band between partner row and civilian houses
-      breeding: { cx: 1180, cy: 390 },  // ground band below the greenhouse
-      park:     { cx: 700, cy: 470 },   // path entering the park, north of the fountain
-      mailbox:  { cx: 425, cy: 348 },   // just below the post office
-      office:   { cx: 120, cy: 605 },   // below the marketplace stalls
-      arena:    { cx: 1170, cy: 425 },  // top edge of battlefield, on the path
+      society:  { cx: 457, cy: 240 },   // path band between partner row and civilian houses
+      breeding: { cx: 1092, cy: 100 },  // above the greenhouse
+      park:     { cx: 832, cy: 475 },   // just above park entry, north of fountain
+      mailbox:  { cx: 538, cy: 282 },   // just above the post office building (-100 left, +34 down)
+      office:   { cx: 348, cy: 526 },   // just above the marketplace stalls
+      arena:    { cx: 1179, cy: 505 },  // just above battlefield top edge
     }
     const a = anchors[z.name] ?? { cx: z.x + z.width / 2, cy: z.y + 12 }
 
@@ -436,8 +629,17 @@ export class WorldScene extends Phaser.Scene {
   /// and visually telegraphs that this house is interactable.
   private renderPartnerLabel(p: ZoneData & { label: string; partner: string; tagline: string }) {
     const colorNum = Number.parseInt(p.color.replace('#', ''), 16)
-    const cx = p.x + p.width / 2
-    const cy = p.y + p.height / 2
+    // Shift partner badges + labels relative to zone center so they sit on
+    // the right half of each building. Per-partner overrides for buildings
+    // whose roof-decor (antennas, chimneys) shifts the visual sweet-spot.
+    const PARTNER_X_OFFSET = 100
+    const PARTNER_Y_OFFSET = -40
+    const xOverrides: Record<string, number> = {
+      'gensyn-axl': 88,  // antenna+dish on the left half pushes badge slightly back left
+    }
+    const xOff = xOverrides[p.partner] ?? PARTNER_X_OFFSET
+    const cx = p.x + p.width / 2 + xOff
+    const cy = p.y + p.height / 2 + PARTNER_Y_OFFSET
 
     // Soft outer glow ring
     const glow = this.add.circle(cx, cy, 28, colorNum, 0.25)
@@ -450,22 +652,34 @@ export class WorldScene extends Phaser.Scene {
       duration: 1600, yoyo: true, repeat: -1,
     })
 
-    // Solid colored disc with partner initial
-    const disc = this.add.circle(cx, cy, 14, colorNum, 0.95)
+    // Solid colored disc as the logo backdrop (gives a consistent shape so
+    // each partner reads as a "badge" even if the logo PNG has irregular
+    // transparency or shape).
+    const disc = this.add.circle(cx, cy, 18, colorNum, 0.95)
     disc.setStrokeStyle(2, 0xffffff, 0.9)
     disc.setDepth(21)
 
-    const initial = (p.label.match(/[A-Z0-9]/)?.[0] ?? '?').slice(0, 1)
-    this.add.text(cx, cy, initial, {
-      fontFamily: '"Press Start 2P", monospace',
-      fontSize: '10px',
-      color: '#ffffff',
-      stroke: '#000000',
-      strokeThickness: 3,
-    }).setOrigin(0.5, 0.5).setDepth(22)
+    // Real partner logo (loaded in preload). Falls back to first letter of
+    // label if the texture failed to load (offline / 404).
+    const logoKey = `logo-${p.partner}`
+    if (this.textures.exists(logoKey)) {
+      const logo = this.add.image(cx, cy, logoKey)
+      logo.setDisplaySize(26, 26)
+      logo.setDepth(22)
+    } else {
+      const initial = (p.label.match(/[A-Z0-9]/)?.[0] ?? '?').slice(0, 1)
+      this.add.text(cx, cy, initial, {
+        fontFamily: '"Press Start 2P", monospace',
+        fontSize: '10px',
+        color: '#ffffff',
+        stroke: '#000000',
+        strokeThickness: 3,
+      }).setOrigin(0.5, 0.5).setDepth(22)
+    }
 
-    // Label below the disc
-    this.add.text(cx, p.y + p.height + 4, p.label, {
+    // Label sits 8px below the disc edge (disc radius 18 + 8px gap = cy+26 for
+    // the label's top origin). Tight enough that badge + name read as one unit.
+    this.add.text(cx, cy + 26, p.label, {
       fontFamily: '"Press Start 2P", monospace',
       fontSize: '8px',
       color: '#f4f4ff',
@@ -715,6 +929,27 @@ export class WorldScene extends Phaser.Scene {
     this.tweens.add({ targets: glow, scale: { from: 0.9, to: 1.1 }, alpha: { from: 0.2, to: 0.05 }, duration: 1800, yoyo: true, repeat: -1 })
   }
 
+  /// Spawns a fading dust puff behind a pet at (x, y) if `moving` and the
+  /// per-pet throttle has elapsed (~120ms between puffs). Used by both the
+  /// player and every other moving pet so the whole map gets the walking-polish
+  /// effect, not just the user.
+  private maybeEmitDust(petId: number, x: number, y: number, moving: boolean, now: number) {
+    if (!moving) return
+    const last = this.dustEmitTimers.get(petId) ?? 0
+    if (now - last < 120) return
+    this.dustEmitTimers.set(petId, now)
+    const dust = this.add.circle(x, y + 10, 4, 0xc4a878, 0.55)
+    dust.setDepth(35)
+    this.tweens.add({
+      targets: dust,
+      alpha: 0,
+      scale: 0.3,
+      duration: 500,
+      ease: 'Sine.easeOut',
+      onComplete: () => dust.destroy(),
+    })
+  }
+
   private updateOtherPets(positions: Record<number, { x: number; y: number; zone: Zone }>) {
     // Add or update rectangles + lazily fetch their sprites
     for (const [idStr, pos] of Object.entries(positions)) {
@@ -732,8 +967,23 @@ export class WorldScene extends Phaser.Scene {
         rect.setDepth(40)
         this.otherPets.set(id, rect)
         void this.loadPetSprite(id)
+        continue
       }
-      rect.setPosition(pos.x, pos.y)
+      // Smooth glide instead of teleport. Position broadcasts arrive at
+      // BROADCAST_HZ (~10Hz, every 100ms). Tween over 110ms slightly out-paces
+      // the next packet so motion looks continuous; if the next packet redirects
+      // mid-tween, Phaser overrides any in-flight tween on the same target.
+      // Tween duration matches broadcast cadence (100ms) — each new packet
+      // arrives just as the prior tween completes, so motion looks
+      // continuous. If a new packet redirects mid-tween, Phaser kills the
+      // in-flight tween automatically.
+      this.tweens.add({
+        targets: rect,
+        x: pos.x,
+        y: pos.y,
+        duration: 100,
+        ease: 'Linear',
+      })
     }
 
     // Remove sprites for pets no longer in positions
@@ -741,6 +991,8 @@ export class WorldScene extends Phaser.Scene {
       if (!(String(id) in positions)) {
         rect.destroy()
         this.otherPets.delete(id)
+        this.dustEmitTimers.delete(id)
+        this.prevPositions.delete(id)
         const sprite = this.petSprites.get(id)
         if (sprite) {
           sprite.destroy()
@@ -756,6 +1008,8 @@ export class WorldScene extends Phaser.Scene {
       rect.destroy()
       this.otherPets.delete(petId)
     }
+    this.dustEmitTimers.delete(petId)
+    this.prevPositions.delete(petId)
     const sprite = this.petSprites.get(petId)
     if (sprite) {
       sprite.destroy()
@@ -764,12 +1018,18 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private handleChat(evt: { from: number; to: number; text: string; timestamp: number }) {
-    // Show chat bubble above the speaking pet
+    // Show chat bubble above the speaking pet. Skip the bubble if the speaker
+    // has no rendered sprite (invisible carrier rect with no Image overlay)
+    // — that prevents the "phantom bubble in empty space" issue without
+    // capping by raw distance, so any pet visible on screen gets its bubble.
     const speaker = evt.from === this.petId ? this.player : this.otherPets.get(evt.from)
-    if (speaker) {
-      // Cast: showChatBubble accepts Sprite | Physics.Sprite, but rectangles share x/y so it works
-      showChatBubble(this, speaker as unknown as Phaser.GameObjects.Sprite, evt.text)
+    if (!speaker) return
+    if (evt.from !== this.petId && !this.petSprites.has(evt.from)) {
+      // Other pet has no loaded sprite → its rect is alpha 0 → invisible.
+      // No point rendering a bubble pointing at nothing.
+      return
     }
+    showChatBubble(this, speaker as unknown as Phaser.GameObjects.Sprite, evt.text)
   }
 }
 

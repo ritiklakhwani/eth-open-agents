@@ -15,6 +15,7 @@ import { EventEmitter } from 'events'
 import { initDB } from './db'
 import { PetSupervisor } from './PetSupervisor'
 import { registerGlobalChat } from './global-chat'
+import { getOgTxHash } from 'og-storage'
 import type { Zone } from 'shared-types'
 
 // ── Shared event bus (pet workers → SSE clients) ─────────────────────────────
@@ -37,6 +38,47 @@ app.get<{ Params: { id: string } }>('/api/pets/:id', (req, reply) => {
   const pet = db.prepare('SELECT * FROM pets WHERE token_id = ?').get(req.params.id)
   if (!pet) return reply.status(404).send({ error: 'Pet not found' })
   return pet
+})
+
+// All keeperhub workflows — used by the KeeperHub integration panel to show
+// judges live workflow rows + on-chain proof. Returns most recent 50.
+app.get('/api/keeperhub/workflows', () => {
+  const workflows = db.prepare(
+    'SELECT id, pet_id, kind, status, payload, created_at FROM keeperhub_workflows ORDER BY created_at DESC LIMIT 50',
+  ).all()
+  return { workflows }
+})
+
+// 0G Vault status — proxies the 0G storage indexer for a given CID and
+// returns a clean status the integration panel can render inline. If the
+// indexer 404s, we report 'local-cache' (we still have the blob in our
+// fallback cache because the testnet Flow contract sometimes reverts on
+// upload, but the Merkle root is real).
+app.get<{ Params: { cid: string } }>('/api/integration/og-status/:cid', async (req) => {
+  const cid = req.params.cid
+  const indexerBase = process.env.ZERO_G_INDEXER_URL ?? 'https://indexer-storage-testnet-turbo.0g.ai'
+  const indexerUrl  = `${indexerBase}/file?root=${cid}`
+  // Side-channel: if og-storage captured an on-chain tx hash from the Go CLI
+  // upload, surface it so the integration panel can render a chainscan link.
+  const txHash = await getOgTxHash(cid).catch(() => null)
+  try {
+    const r = await fetch(indexerUrl, { signal: AbortSignal.timeout(4000) })
+    if (!r.ok) {
+      return { cid, status: 'unreachable', indexer: indexerUrl, message: `HTTP ${r.status}`, txHash }
+    }
+    const j = await r.json() as { code?: number; data?: unknown; message?: string } | Record<string, unknown>
+    // The indexer returns one of two shapes:
+    //   1. SUCCESS — the raw blob JSON (no `code` field; whatever the user uploaded)
+    //   2. NOT FOUND — `{"code":101,"message":"File not found","data":null}`
+    // We treat anything that isn't a `code !== 0` error envelope as "on-0g".
+    const isError = typeof (j as { code?: number }).code === 'number' && (j as { code?: number }).code !== 0
+    if (!isError) {
+      return { cid, status: 'on-0g', indexer: indexerUrl, data: j, txHash }
+    }
+    return { cid, status: 'local-cache', indexer: indexerUrl, message: (j as { message?: string }).message ?? 'not on indexer', txHash }
+  } catch (err) {
+    return { cid, status: 'unreachable', indexer: indexerUrl, message: (err as Error).message, txHash }
+  }
 })
 
 // SSE — streams pet state updates to the frontend every second
@@ -494,7 +536,9 @@ async function main() {
   // them every 5s so they drift around the park. Browser-driven pets are
   // skipped (the user is moving them). This makes the proximity broker
   // work without requiring a browser per pet — multiple AXL nodes can
-  // chat in the background while a single user watches. Park is (0,0)→(480,480).
+  // chat in the background while a single user watches.
+  // Park zone (matches world.tmj): (635, 485, 395, 283). Seed coords stay
+  // inside that rect with a 25px margin so pets don't spawn on the edges.
   function seedHeadlessPositions() {
     const livePets = db.prepare(
       "SELECT token_id FROM pets WHERE peer_id IS NOT NULL AND peer_id != ''"
@@ -503,9 +547,13 @@ async function main() {
     let seeded = 0
     for (const { token_id } of livePets) {
       if (positions.has(token_id)) continue
+      // Spawn at a random hotspot — pets distribute across the map instead
+      // of all clustering in the same fountain box. wander state then takes
+      // over and walks them somewhere else.
+      const spawn = HOTSPOTS[Math.floor(Math.random() * HOTSPOTS.length)]
       positions.set(token_id, {
-        x: 60 + Math.random() * 360,    // 60..420 — inside park, away from edges
-        y: 60 + Math.random() * 360,
+        x: spawn.x + (Math.random() - 0.5) * 40,
+        y: spawn.y + (Math.random() - 0.5) * 40,
         zone: 'park',
       })
       seeded++
@@ -513,12 +561,112 @@ async function main() {
     if (seeded > 0) console.log(`[Hub] Seeded ${seeded} headless pet position(s) in Park`)
   }
 
+  // ── Goal-based wander state ────────────────────────────────────────────
+  // Each pet has a personality (speed + loiter ranges) set at first spawn,
+  // plus a current target picked from a hotspot list spread across the map.
+  // Result: pets walk purposefully to different parts of the world, pause
+  // for varying amounts of time, cross paths organically. No two pets move
+  // in lockstep, and they cover the whole map — not just the park.
+  interface WanderState {
+    target:      { x: number; y: number; linger?: boolean }
+    loiterUntil: number  // ms timestamp; stand still until then
+    baseSpeed:   number  // pixels per tick (~10Hz tick → 25-50 px/sec)
+    // Personality dials, rolled once on first spawn:
+    minLoiter:   number  // min ms to loiter at a target
+    maxLoiter:   number  // max ms to loiter at a target
+  }
+  const wanderStates = new Map<number, WanderState>()
+
+  // Hotspot destinations — interesting points spread across the WHOLE map,
+  // grouped by region. Pets pick one + small jitter as their next target,
+  // so each pet walks to the mailbox, then partner row, then breeding,
+  // then battlefield, then pond... looks like an owner is sending them.
+  //
+  // Some hotspots are flagged as "linger" (pond, fountain) — pets pause
+  // longer there so it looks like they're swimming or resting.
+  interface Hotspot { x: number; y: number; linger?: boolean }
+  const HOTSPOTS: Hotspot[] = [
+    // — SOCIETY (favoured for demo presence; ~12 hotspots, biggest cluster)
+    // Path band between partner row and civilian houses
+    { x: 250, y: 280 }, { x: 360, y: 270 }, { x: 470, y: 260 }, { x: 580, y: 280 },
+    { x: 200, y: 320 }, { x: 320, y: 320 }, { x: 440, y: 320 }, { x: 540, y: 320 },
+    // Civilian house porches
+    { x: 130, y: 380 }, { x: 240, y: 420 }, { x: 360, y: 470 }, { x: 460, y: 500 },
+
+    // — PARTNER ROW porches (in front of integration houses) — 4 spots
+    { x: 220, y: 215 }, { x: 380, y: 215 }, { x: 560, y: 215 }, { x: 750, y: 215 },
+
+    // — MAILBOX approach + door (3)
+    { x: 640, y: 480 }, { x: 600, y: 380 }, { x: 670, y: 530 },
+
+    // — BREEDING hall front (3)
+    { x: 1090, y: 380 }, { x: 1190, y: 440 }, { x: 1240, y: 380 },
+
+    // — BATTLEFIELD arena (3)
+    { x: 1100, y: 580 }, { x: 1200, y: 660 }, { x: 1280, y: 580 },
+
+    // — CENTRAL PARK (fountain + benches) — kept small so pets don't all
+    // collect here. No linger flag — pets pause normal time then move on.
+    { x: 720, y: 620 }, { x: 830, y: 620 }, { x: 940, y: 660 },
+    { x: 800, y: 500 },
+
+    // — MARKETPLACE stalls (2)
+    { x: 380, y: 660 }, { x: 320, y: 600 },
+
+    // — POND (decorative). Hotspots placed INSIDE wander bounds — earlier
+    // x=60 was outside WANDER_X_MIN(100) so every visiting pet clamped
+    // to x=100, piling up at the same boundary coord.
+    { x: 130, y: 700 },
+    { x: 220, y: 730 },
+
+    // — Connecting path waypoints (cross-map traversal)
+    { x: 480, y: 380 }, { x: 540, y: 460 },
+    { x: 850, y: 400 }, { x: 1000, y: 480 },
+    { x: 950, y: 350 },
+  ]
+
+  // Soft world bounds for wander — clamps motion to the playable map.
+  const WANDER_X_MIN = 100, WANDER_X_MAX = 1290
+  const WANDER_Y_MIN = 180, WANDER_Y_MAX = 750
+
+  function pickWanderTarget(): { x: number; y: number; linger?: boolean } {
+    const h = HOTSPOTS[Math.floor(Math.random() * HOTSPOTS.length)]
+    // ±60px jitter (was ±25) so pets don't snap to nearly-identical coords
+    // when they pick the same hotspot. Spreads out crowds.
+    return {
+      x:      h.x + (Math.random() - 0.5) * 120,
+      y:      h.y + (Math.random() - 0.5) * 120,
+      linger: h.linger,
+    }
+  }
+
+  function ensureWanderState(petId: number): WanderState {
+    let s = wanderStates.get(petId)
+    if (!s) {
+      // Personality roll — varied speed only. ALL pets keep moving almost
+      // continuously: tiny natural hesitation between targets (200-700ms),
+      // never a multi-second idle. The only thing that stops a pet is an
+      // active chat (handled separately via inConversation).
+      s = {
+        target:      pickWanderTarget(),
+        // Stagger the first move 0-1500ms so they don't all set off at once.
+        loiterUntil: Date.now() + Math.random() * 1500,
+        // 2.5-5.0 px / 100ms tick = 25-50 px/sec
+        baseSpeed:   2.5 + Math.random() * 2.5,
+        // Brief hesitation only — pet flicks to next target almost immediately.
+        minLoiter:   200,
+        maxLoiter:   700,
+      }
+      wanderStates.set(petId, s)
+    }
+    return s
+  }
+
   function wanderTick() {
     const now = Date.now()
 
     // GC: remove ghost positions for pets that have no peer_id in DB AND
-    // haven't been moved by anyone in 30s. Browser tabs that closed without
-    // a clean disconnect, or stale entries from an earlier session.
+    // haven't been moved by anyone in 30s.
     for (const petId of [...positions.keys()]) {
       const last = lastMoveAt.get(petId) ?? 0
       const stale = now - last > 30_000
@@ -528,24 +676,93 @@ async function main() {
       if (!hasWorker && !browserDriven.has(petId) && stale) {
         positions.delete(petId)
         lastMoveAt.delete(petId)
+        wanderStates.delete(petId)
         console.log(`[Hub] GC ghost position for pet ${petId}`)
       }
     }
 
     for (const [petId, pos] of positions) {
-      // If browser has driven this pet within IDLE_THRESHOLD, leave alone.
-      // Otherwise (idle or headless), nudge them.
+      // If browser has driven this pet within IDLE_THRESHOLD, leave alone —
+      // the user is moving them. Reset their wander state so when the user
+      // releases keys, the pet picks a fresh target from where it ended up.
       const last = lastMoveAt.get(petId) ?? 0
       const recentlyDriven = now - last < IDLE_THRESHOLD_MS
-      if (browserDriven.has(petId) && recentlyDriven) continue
+      if (browserDriven.has(petId) && recentlyDriven) {
+        wanderStates.delete(petId)
+        continue
+      }
 
-      // Pause while in conversation — pets stand still during chat
+      // Pause while in conversation — pets stand still during chat.
       const convoUntil = inConversation.get(petId) ?? 0
       if (convoUntil > now) continue
       if (convoUntil > 0) inConversation.delete(petId)
 
-      const nx = clamp(pos.x + (Math.random() - 0.5) * 40, 40, 440)
-      const ny = clamp(pos.y + (Math.random() - 0.5) * 40, 40, 440)
+      const state = ensureWanderState(petId)
+
+      // Loitering at last target → stand still until the timer expires.
+      if (state.loiterUntil > now) continue
+
+      const dx = state.target.x - pos.x
+      const dy = state.target.y - pos.y
+      const dist = Math.hypot(dx, dy)
+      if (dist < state.baseSpeed * 1.5) {
+        // Arrived. Snap, pick a new target, brief hesitation, then move on.
+        positions.set(petId, { x: state.target.x, y: state.target.y, zone: pos.zone })
+
+        // If crowded at the arrival point, pick a target FAR from the cluster
+        // center so the next walk leg leaves the crowd. No teleport — the
+        // pet just walks away naturally during the next tick.
+        let crowded = false
+        for (const [otherId, otherPos] of positions) {
+          if (otherId === petId) continue
+          if (Math.hypot(otherPos.x - state.target.x, otherPos.y - state.target.y) < 70) {
+            crowded = true
+            break
+          }
+        }
+        if (crowded) {
+          // Try a few targets, take the one furthest from current position.
+          let best = pickWanderTarget()
+          let bestDist = Math.hypot(best.x - state.target.x, best.y - state.target.y)
+          for (let i = 0; i < 3; i++) {
+            const candidate = pickWanderTarget()
+            const cd = Math.hypot(candidate.x - state.target.x, candidate.y - state.target.y)
+            if (cd > bestDist) { best = candidate; bestDist = cd }
+          }
+          state.target = best
+          state.loiterUntil = now + 50  // basically no hesitation when crowded
+        } else {
+          state.target = pickWanderTarget()
+          state.loiterUntil = now + state.minLoiter
+                                  + Math.random() * (state.maxLoiter - state.minLoiter)
+        }
+        continue
+      }
+
+      // ── Per-tick separation while WALKING (boids-style repulsion) ───────
+      // Sum a small repulsion vector from any pet within 50 px, scaled by
+      // proximity (closer = stronger push). Combined with the walk vector,
+      // this nudges direction smoothly without ever teleporting — fixes the
+      // sudden-fast-glitch the user reported.
+      let repulseX = 0, repulseY = 0
+      for (const [otherId, otherPos] of positions) {
+        if (otherId === petId) continue
+        const ddx = pos.x - otherPos.x
+        const ddy = pos.y - otherPos.y
+        const dd  = Math.hypot(ddx, ddy)
+        if (dd > 50 || dd < 1) continue
+        // Force inverse-proportional to distance, clamped to baseSpeed.
+        const force = Math.min(state.baseSpeed * 0.7, (50 - dd) * 0.06)
+        repulseX += (ddx / dd) * force
+        repulseY += (ddy / dd) * force
+      }
+
+      // Step toward target with small directional noise + separation force.
+      const noise = state.baseSpeed * 0.15
+      const stepX = (dx / dist) * state.baseSpeed + repulseX + (Math.random() - 0.5) * noise
+      const stepY = (dy / dist) * state.baseSpeed + repulseY + (Math.random() - 0.5) * noise
+      const nx = clamp(pos.x + stepX, WANDER_X_MIN, WANDER_X_MAX)
+      const ny = clamp(pos.y + stepY, WANDER_Y_MIN, WANDER_Y_MAX)
       positions.set(petId, { x: nx, y: ny, zone: pos.zone })
     }
   }
@@ -561,19 +778,20 @@ async function main() {
     }
   }, 100)
 
-  // Proximity chat: when two pets are within PROXIMITY_INIT_PX, trigger one
-  // AXL chat exchange. Once chatting, the conversation ends if they drift past
-  // PROXIMITY_BREAK_PX so the bubble stops mid-flight when one wanders away.
-  // Tuned for "pets visibly chatting" feel without smashing Anthropic Haiku
-  // (50 req/min cap). The canned-opener fallback in the worker means even
-  // a 429 doesn't blank the chat — bubble still renders.
-  //  - Per-pair cooldown 30s (so same two pets keep talking when adjacent)
-  //  - Global throttle 4s (~15 broker fires/min x 2 workers ~ 30 Haiku/min)
-  //  - Random pair selection per tick — fairness across pets
-  const PROXIMITY_INIT_PX     = 110
-  const PROXIMITY_BREAK_PX    = 160
-  const PROXIMITY_COOLDOWN_MS = 8_000
-  const BROKER_THROTTLE_MS    = 1_500
+  // Proximity chat: when two pets are within PROXIMITY_INIT_PX, fire one
+  // AXL chat exchange almost immediately. Workers then bounce replies back
+  // and forth via AXL until the pets drift past PROXIMITY_BREAK_PX (chat-end
+  // IPC kills the in-flight reply at the worker so no stale bubble lands).
+  // Canned-opener fallback in the worker means even a 429 from Anthropic
+  // doesn't blank the chat — bubble still renders.
+  //  - PROXIMITY_INIT_PX 140  (fire as soon as two pets approach)
+  //  - PROXIMITY_BREAK_PX 220 (don't end on small wander drift mid-chat)
+  //  - PROXIMITY_COOLDOWN_MS 3s (allow re-conversation after a brief gap)
+  //  - BROKER_THROTTLE_MS 250ms (effectively per-tick — chat starts fast)
+  const PROXIMITY_INIT_PX     = 140
+  const PROXIMITY_BREAK_PX    = 220
+  const PROXIMITY_COOLDOWN_MS = 3_000
+  const BROKER_THROTTLE_MS    = 250
 
   const lastProximityChat = new Map<string, number>()
   let lastBrokerFire = 0
@@ -581,6 +799,13 @@ async function main() {
   // Pets currently engaged in a Hub-brokered conversation. Both directions of
   // the pair share the same entry; cleared when bubble lands or proximity breaks.
   const activeChats = new Map<number, number>()  // petId -> partnerPetId
+
+  // Per-pet "just ended a chat" cooldown — blocks the broker from re-pairing
+  // a pet for 1.5s after their last chat ended. Without this, in-flight
+  // chat-outs from the previous pairing arrive at the gate AFTER activeChats
+  // has been overwritten by a new pairing → "no-longer-paired" drops.
+  const recentlyPaired = new Map<number, number>()  // petId -> unblockAtMs
+  const RE_PAIR_COOLDOWN_MS = 1_500
 
   function distanceBetween(a: number, b: number): number | null {
     const pa = positions.get(a)
@@ -592,6 +817,11 @@ async function main() {
   function endChat(a: number, b: number) {
     if (activeChats.get(a) === b) activeChats.delete(a)
     if (activeChats.get(b) === a) activeChats.delete(b)
+    // Mark both as recently paired — cooldown prevents an immediate re-pair
+    // race that drops in-flight chat-outs from this just-ended chat.
+    const unblockAt = Date.now() + RE_PAIR_COOLDOWN_MS
+    recentlyPaired.set(a, unblockAt)
+    recentlyPaired.set(b, unblockAt)
     // Tell both workers to abort any in-flight reply they were about to send
     supervisor.broadcast(a, { type: 'chat-end', withPetId: b })
     supervisor.broadcast(b, { type: 'chat-end', withPetId: a })
@@ -599,16 +829,31 @@ async function main() {
 
   // Gate every chat-out IPC: if the speaker is no longer paired with the
   // listener, or they've drifted past PROXIMITY_BREAK_PX, drop the bubble.
+  // Also refreshes the wander-pause for BOTH participants every time a
+  // chat passes the gate — so pets stand still for the entire conversation,
+  // not just the initial 10-second CONVO_PAUSE_MS window.
+  // Returns one of: true (deliver), 'not-paired', 'drift', or 'no-position'.
   supervisor.setChatGate((fromId, toId) => {
     const partner = activeChats.get(fromId)
-    if (partner !== toId) return false
-    const d = distanceBetween(fromId, toId)
-    if (d == null) return false
-    if (d > PROXIMITY_BREAK_PX) {
-      endChat(fromId, toId)
-      console.log(`[Broker] Chat ended pet ${fromId}<->${toId} drift=${d.toFixed(0)}px`)
+    if (partner !== toId) {
+      console.log(`[Broker] gate drop: pet ${fromId}->${toId} no-longer-paired (active=${partner ?? 'none'})`)
       return false
     }
+    const d = distanceBetween(fromId, toId)
+    if (d == null) {
+      console.log(`[Broker] gate drop: pet ${fromId}->${toId} no-position`)
+      return false
+    }
+    if (d > PROXIMITY_BREAK_PX) {
+      endChat(fromId, toId)
+      console.log(`[Broker] gate drop: pet ${fromId}<->${toId} drifted ${d.toFixed(0)}px`)
+      return false
+    }
+    // Refresh wander pause for both participants — keep them still while
+    // chatting actively. Cleared automatically when activeChats is cleared.
+    const now = Date.now()
+    inConversation.set(fromId, now + CONVO_PAUSE_MS)
+    inConversation.set(toId,   now + CONVO_PAUSE_MS)
     return true
   })
 
@@ -639,40 +884,70 @@ async function main() {
         const pairKey = `${Math.min(a, b)}-${Math.max(a, b)}`
         if ((lastProximityChat.get(pairKey) ?? 0) + PROXIMITY_COOLDOWN_MS > now) continue
         if (activeChats.has(a) || activeChats.has(b)) continue
+        // Per-pet cooldown after a just-ended chat — gives in-flight chat-outs
+        // from the previous pairing time to land at the gate before a new
+        // pairing replaces activeChats[pet].
+        const cdA = recentlyPaired.get(a) ?? 0
+        const cdB = recentlyPaired.get(b) ?? 0
+        if (cdA > now || cdB > now) continue
+        if (cdA && cdA <= now) recentlyPaired.delete(a)
+        if (cdB && cdB <= now) recentlyPaired.delete(b)
 
         const petA = db.prepare('SELECT peer_id, name FROM pets WHERE token_id = ?')
           .get(a) as { peer_id: string | null; name: string } | undefined
         const petB = db.prepare('SELECT peer_id, name FROM pets WHERE token_id = ?')
           .get(b) as { peer_id: string | null; name: string } | undefined
-        if (!petA?.peer_id || !petB?.peer_id) continue
-
+        if (!petA || !petB) continue
+        // peer_id may be null if AXL didn't initialize. axl.send has a Hub-relay
+        // fallback that doesn't need peer_id, so we still queue the pair.
         candidates.push([
           a, b,
-          { peer_id: petA.peer_id, name: petA.name },
-          { peer_id: petB.peer_id, name: petB.name },
+          { peer_id: petA.peer_id ?? '', name: petA.name },
+          { peer_id: petB.peer_id ?? '', name: petB.name },
         ])
       }
     }
 
     if (candidates.length === 0) return
+    console.log(`[Broker] tick — ${candidates.length} eligible pair(s)`)
 
-    // Pick one pair at random from candidates to fire this tick.
-    const [a, b, petA, petB] = candidates[Math.floor(Math.random() * candidates.length)]
-    const pairKey = `${Math.min(a, b)}-${Math.max(a, b)}`
-    lastProximityChat.set(pairKey, now)
+    // Sort candidates so player-involved pairs fire first (any pet that's
+    // currently browser-driven). Then take up to MAX_FIRES_PER_TICK pairs.
+    candidates.sort((c1, c2) => {
+      const c1Player = browserDriven.has(c1[0]) || browserDriven.has(c1[1]) ? 1 : 0
+      const c2Player = browserDriven.has(c2[0]) || browserDriven.has(c2[1]) ? 1 : 0
+      return c2Player - c1Player
+    })
+
+    const MAX_FIRES_PER_TICK = 3
     lastBrokerFire = now
 
-    // Pause both pets so they stand still while talking
-    inConversation.set(a, now + CONVO_PAUSE_MS)
-    inConversation.set(b, now + CONVO_PAUSE_MS)
+    // Track pets already paired in this tick. Without this, two candidate
+    // pairs that share a pet (e.g., 31<->44 and 36<->44) both fire and the
+    // second overwrites activeChats[44], making the first chat's IPC fail
+    // the gate ("not paired anymore").
+    const pairedThisTick = new Set<number>()
 
-    activeChats.set(a, b)
-    activeChats.set(b, a)
+    let firedCount = 0
+    for (const [a, b, petA, petB] of candidates) {
+      if (firedCount >= MAX_FIRES_PER_TICK) break
+      if (pairedThisTick.has(a) || pairedThisTick.has(b)) continue
 
-    supervisor.broadcast(a, { type: 'chat-request', withPetId: b, withPeerId: petB.peer_id, withName: petB.name })
-    supervisor.broadcast(b, { type: 'chat-request', withPetId: a, withPeerId: petA.peer_id, withName: petA.name })
-    console.log(`[Broker] Fired chat-request: pet ${a} <-> pet ${b} (paused ${CONVO_PAUSE_MS / 1000}s)`)
-  }, 2_000)
+      const pairKey = `${Math.min(a, b)}-${Math.max(a, b)}`
+      lastProximityChat.set(pairKey, now)
+      // Pause both pets so they stand still while talking
+      inConversation.set(a, now + CONVO_PAUSE_MS)
+      inConversation.set(b, now + CONVO_PAUSE_MS)
+      activeChats.set(a, b)
+      activeChats.set(b, a)
+      pairedThisTick.add(a)
+      pairedThisTick.add(b)
+      supervisor.broadcast(a, { type: 'chat-request', withPetId: b, withPeerId: petB.peer_id, withName: petB.name })
+      supervisor.broadcast(b, { type: 'chat-request', withPetId: a, withPeerId: petA.peer_id, withName: petA.name })
+      console.log(`[Broker] Fired chat-request: pet ${a} <-> pet ${b}`)
+      firedCount++
+    }
+  }, 250)   // tick fast so chat starts within ~250ms of pets coming close
 
   await supervisor.start()
   bootstrapAdoptionChain().catch(err => console.error('[Hub] adoption-chain bootstrap failed:', err.message))
@@ -688,7 +963,12 @@ async function main() {
   // After that, nudge them every 5s so the park has constant background motion.
   setTimeout(() => {
     seedHeadlessPositions()
-    setInterval(wanderTick, 5_000)
+    // Wander tick at 10Hz (every 100ms — matching the position broadcast
+    // cadence). Combined with per-pet speeds of 1.5-3 px/tick, pets cross
+    // the map at ~15-30 px/sec. Tiny per-tick steps + frontend tween over
+    // 110ms = buttery-smooth motion. Each pet has its own target, speed,
+    // and personality loiter range so they never move in lockstep.
+    setInterval(wanderTick, 100)
   }, 8_000)
   // Re-seed any newly-minted pets every 30s so freshly-spawned workers join
   // the wander pool once their peer_id lands in the DB.

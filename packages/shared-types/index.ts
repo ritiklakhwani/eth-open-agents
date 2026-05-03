@@ -1,6 +1,8 @@
 // Shared types between Hub (Karmanay) and Frontend (Ritik).
 // Ritik writes, Karmanay imports as read-only.
 
+export * from './walls'
+
 export type Zone = 'park' | 'office' | 'arena' | 'lounge' | 'kitchen' | 'mailbox' | 'society' | 'breeding' | 'pond'
 
 export type Archetype = 'sage' | 'gremlin' | 'athlete' | 'joker' | 'scholar'

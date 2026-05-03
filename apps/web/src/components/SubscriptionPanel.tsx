@@ -197,10 +197,10 @@ export function SubscriptionPanel({ open, onClose, petId }: SubscriptionPanelPro
                   key={s.id}
                   onClick={() => toggle(s.id)}
                   className={[
-                    'cursor-pointer text-left border-4 p-3 transition-none',
+                    'cursor-pointer text-left border p-3 transition-colors',
                     checked
-                      ? 'bg-[color:var(--color-bg-hi)] border-[color:var(--color-pink)]'
-                      : 'bg-[color:var(--color-bg-mid)] border-[color:var(--color-border)] hover:bg-[color:var(--color-bg-hi)]',
+                      ? 'bg-[color:var(--color-yellow)]/10 border-[color:var(--color-yellow)]/60'
+                      : 'bg-[rgba(10,12,46,0.55)] border-[color:var(--color-yellow)]/15 hover:border-[color:var(--color-yellow)]/35 hover:bg-[rgba(10,12,46,0.75)]',
                   ].join(' ')}
                 >
                   <div className="flex justify-between items-baseline mb-1">

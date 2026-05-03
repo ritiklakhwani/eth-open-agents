@@ -100,27 +100,23 @@ export function PetInspector({ petId, pollIntervalMs = 5000, onBreed }: PetInspe
 
   return (
     <div className="pointer-events-auto">
-      <PixelCard
-        variant="pink"
-        className="w-72"
-        title={
-          <span className="flex items-center gap-2">
+      <div className="w-72 border border-[color:var(--color-yellow)]/35 bg-[rgba(10,12,46,0.78)] backdrop-blur-sm">
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-[color:var(--color-yellow)]/20 bg-[rgba(10,12,46,0.5)] px-3 py-2">
+          <h3 className="font-[family-name:var(--font-pixel)] text-[11px] tracking-widest uppercase text-[color:var(--color-yellow)] flex items-center gap-2">
             <span style={{ color: archetypeColor }}>{ARCHETYPE_BADGE[pet.archetype]}</span>
             <span>{pet.name.toUpperCase()}</span>
-          </span>
-        }
-        headerRight={
+          </h3>
           <button
             onClick={() => setCollapsed((c) => !c)}
-            className="font-[family-name:var(--font-pixel)] text-[10px] text-[color:var(--color-ink-mid)] hover:text-[color:var(--color-pink)] cursor-pointer"
+            className="font-[family-name:var(--font-pixel)] text-[10px] text-[color:var(--color-ink-low)] hover:text-[color:var(--color-yellow)] cursor-pointer"
             aria-label={collapsed ? 'Expand' : 'Collapse'}
           >
             {collapsed ? '[ + ]' : '[ - ]'}
           </button>
-        }
-      >
+        </div>
         {!collapsed && (
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-3 p-3">
             {/* Sprite — shows the user-generated pixel-art pet */}
             {pet.spriteUrl && !/\/sprites\/(sage|gremlin|athlete|joker|scholar)\.png$/.test(pet.spriteUrl) && (
               <div className="flex justify-center">
@@ -156,11 +152,11 @@ export function PetInspector({ petId, pollIntervalMs = 5000, onBreed }: PetInspe
               <Row label="TOKEN" value={`#${pet.tokenId}`} valueColor="var(--color-ink-mid)" />
             </div>
 
-            {/* Action: breed */}
+            {/* Action: breed — warm yellow, matches map lamps */}
             {onBreed && (
               <button
                 onClick={onBreed}
-                className="cursor-pointer border-2 border-[color:var(--color-pink)] bg-[color:var(--color-bg-mid)] hover:bg-[color:var(--color-bg-hi)] py-1.5 font-[family-name:var(--font-pixel)] text-[10px] tracking-widest text-[color:var(--color-pink)]"
+                className="cursor-pointer border border-[color:var(--color-yellow)]/50 bg-[color:var(--color-yellow)]/5 hover:bg-[color:var(--color-yellow)]/15 py-1.5 font-[family-name:var(--font-pixel)] text-[10px] tracking-widest text-[color:var(--color-yellow)] transition-colors"
               >
                 ✦ BREED
               </button>
@@ -188,7 +184,7 @@ export function PetInspector({ petId, pollIntervalMs = 5000, onBreed }: PetInspe
             </div>
           </div>
         )}
-      </PixelCard>
+      </div>
     </div>
   )
 }

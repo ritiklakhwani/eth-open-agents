@@ -19,6 +19,7 @@
     "dotenv": "^17.4.2",
     "ens": "workspace:*",
     "keeperhub": "workspace:*",
+    "og-storage": "workspace:*",
     "fastify": "^5.8.5",
     "shared-types": "workspace:*",
     "socket.io": "^4.8.3",

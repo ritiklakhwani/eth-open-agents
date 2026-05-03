@@ -10,6 +10,7 @@ import { BattleArena } from '@/components/BattleArena'
 import { BreedingFlow } from '@/components/BreedingFlow'
 import { GlobalChat } from '@/components/GlobalChat'
 import { ZoneActionBanner } from '@/components/ZoneActionBanner'
+import { IntegrationModal, type PartnerKey } from '@/components/IntegrationModal'
 
 /**
  * Dev: load petId from URL ?pet= query so you can open two windows with different pets:
@@ -39,6 +40,7 @@ export default function WorldPage() {
   const [currentZone, setCurrentZone] = useState<Zone | null>(null)
   const [activeModal, setActiveModal] = useState<InteractiveZone | null>(null)
   const [breedingOpen, setBreedingOpen] = useState(false)
+  const [integrationPartner, setIntegrationPartner] = useState<PartnerKey | null>(null)
   const [scene, setScene] = useState<SceneEventEmitter | null>(null)
   const { address } = useAccount()
 
@@ -94,6 +96,14 @@ export default function WorldPage() {
         onOpenMailbox={() => setActiveModal('mailbox')}
         onOpenOffice={() => setActiveModal('office')}
         onOpenBreeding={() => setBreedingOpen(true)}
+        onOpenIntegration={(p) => setIntegrationPartner(p)}
+      />
+
+      <IntegrationModal
+        open={integrationPartner !== null}
+        onClose={() => setIntegrationPartner(null)}
+        partner={integrationPartner}
+        activePetId={petId}
       />
 
       {/* "Press E to interact" prompt — only when in an interactive zone
@@ -129,6 +139,13 @@ export default function WorldPage() {
         onClose={() => setBreedingOpen(false)}
         petId={petId}
         ownerAddress={address}
+        onMinted={(data) => {
+          // Close the modal so the world animation is visible behind it.
+          // BreedingFlow's internal `done` view briefly flashes before close
+          // — that's fine; the user sees the world reveal as the modal exits.
+          setBreedingOpen(false)
+          scene?.events.emit('breeding-mint-done', data)
+        }}
       />
 
       {/* Global human-owner chat — bottom-right, collapsible */}

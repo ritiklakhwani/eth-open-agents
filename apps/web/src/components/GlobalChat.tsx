@@ -100,22 +100,22 @@ export function GlobalChat() {
 
   return (
     <div className="fixed bottom-4 right-4 z-30 w-[360px] max-w-[calc(100vw-2rem)]">
-      <div className="border-4 border-[color:var(--color-pink)] bg-[color:var(--color-bg-mid)] shadow-[4px_4px_0_0_var(--color-bg-deep)]">
+      <div className="border border-[color:var(--color-yellow)]/35 bg-[rgba(10,12,46,0.78)] backdrop-blur-sm">
         {/* Header — click to collapse / expand */}
         <button
           type="button"
           onClick={() => setCollapsed((c) => !c)}
-          className="flex w-full items-center justify-between border-b-4 border-[color:var(--color-bg-deep)] bg-[color:var(--color-bg-deep)] px-3 py-2 cursor-pointer"
+          className="flex w-full items-center justify-between border-b border-[color:var(--color-yellow)]/20 bg-[rgba(10,12,46,0.5)] px-3 py-2 cursor-pointer"
           aria-expanded={!collapsed}
         >
-          <span className="font-[family-name:var(--font-pixel)] text-[10px] uppercase tracking-widest text-[color:var(--color-pink)]">
+          <span className="font-[family-name:var(--font-pixel)] text-[10px] uppercase tracking-widest text-[color:var(--color-yellow)]">
             GLOBAL CHAT
           </span>
           <span className="flex items-center gap-2">
-            <span className="font-[family-name:var(--font-pixel)] text-[10px] tracking-widest text-[color:var(--color-cyan)]">
+            <span className="font-[family-name:var(--font-pixel)] text-[10px] tracking-widest text-[color:var(--color-ink-mid)]">
               {onlineCount} ONLINE
             </span>
-            <span className="font-[family-name:var(--font-pixel)] text-[10px] text-[color:var(--color-ink)]">
+            <span className="font-[family-name:var(--font-pixel)] text-[10px] text-[color:var(--color-ink-low)]">
               {collapsed ? '[+]' : '[-]'}
             </span>
           </span>
@@ -124,7 +124,7 @@ export function GlobalChat() {
         {!collapsed && (
           <div className="flex flex-col">
             {/* Online users panel */}
-            <div className="border-b-4 border-[color:var(--color-bg-deep)] bg-[color:var(--color-bg-hi)] px-3 py-2 max-h-24 overflow-y-auto">
+            <div className="border-b border-[color:var(--color-yellow)]/15 bg-[rgba(10,12,46,0.3)] px-3 py-2 max-h-24 overflow-y-auto">
               <p className="font-[family-name:var(--font-pixel)] text-[8px] uppercase tracking-widest text-[color:var(--color-ink-mid)] mb-1">
                 ONLINE OWNERS
               </p>
@@ -157,7 +157,7 @@ export function GlobalChat() {
             </div>
 
             {/* Message list */}
-            <div className="px-3 py-2 h-64 overflow-y-auto bg-[color:var(--color-bg-mid)]">
+            <div className="px-3 py-2 h-64 overflow-y-auto bg-[rgba(10,12,46,0.2)]">
               {messages.length === 0 ? (
                 <p className="font-[family-name:var(--font-pixel-readable)] text-base text-[color:var(--color-ink-low)] text-center mt-8">
                   no messages yet — say hi
@@ -193,7 +193,7 @@ export function GlobalChat() {
             </div>
 
             {/* Input */}
-            <div className="border-t-4 border-[color:var(--color-bg-deep)] bg-[color:var(--color-bg-deep)] p-2">
+            <div className="border-t border-[color:var(--color-yellow)]/20 bg-[rgba(10,12,46,0.5)] p-2">
               {!isConnected || !address ? (
                 <p className="font-[family-name:var(--font-pixel)] text-[10px] tracking-widest text-[color:var(--color-yellow)] text-center py-1.5 animate-blink">
                   CONNECT WALLET TO CHAT
@@ -212,13 +212,13 @@ export function GlobalChat() {
                     }}
                     placeholder="type a message..."
                     maxLength={MAX_MESSAGE_LEN}
-                    className="flex-1 border-2 border-[color:var(--color-border)] bg-[color:var(--color-bg-mid)] px-2 py-1 font-[family-name:var(--font-pixel-readable)] text-base text-[color:var(--color-ink)] placeholder:text-[color:var(--color-ink-low)] outline-none focus:border-[color:var(--color-cyan)]"
+                    className="flex-1 border border-[color:var(--color-yellow)]/25 bg-[rgba(10,12,46,0.5)] px-2 py-1 font-[family-name:var(--font-pixel-readable)] text-base text-[color:var(--color-ink)] placeholder:text-[color:var(--color-ink-low)] outline-none focus:border-[color:var(--color-yellow)]/60"
                   />
                   <button
                     type="button"
                     onClick={handleSend}
                     disabled={draft.trim().length === 0}
-                    className="border-2 border-[color:var(--color-bg-deep)] bg-[color:var(--color-pink)] px-3 py-1 font-[family-name:var(--font-pixel)] text-[10px] tracking-widest text-[color:var(--color-bg-deep)] hover:bg-[color:var(--color-pink-hi)] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shadow-[2px_2px_0_0_var(--color-bg-deep)] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
+                    className="border border-[color:var(--color-yellow)]/50 bg-[color:var(--color-yellow)]/10 hover:bg-[color:var(--color-yellow)]/20 px-3 py-1 font-[family-name:var(--font-pixel)] text-[10px] tracking-widest text-[color:var(--color-yellow)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
                   >
                     SEND
                   </button>

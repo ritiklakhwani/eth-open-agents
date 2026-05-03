@@ -9,6 +9,17 @@ const SONNET_DAILY_CAP = 5
 
 setInterval(() => { sonnetCallsToday = 0 }, 24 * 60 * 60 * 1000)
 
+// User-typed pet names sometimes contain tokens Anthropic's safety layer
+// rejects with HTTP 400 (slurs etc.). We need to scrub before passing any
+// user-typed text into the LLM prompt; display name in the UI is unchanged.
+// Token list intentionally simple — covers the common cases observed in logs.
+const FLAGGED_TOKENS = /\b(nigg|nigge|nigga|nigger|chink|spic|kike|fag|cunt|retard)\w*/gi
+
+function sanitizeForLLM(text: string | undefined | null): string {
+  if (!text) return ''
+  return String(text).replace(FLAGGED_TOKENS, 'friend')
+}
+
 export class Brain {
   constructor(private opts: {
     personality: string
@@ -21,17 +32,22 @@ export class Brain {
     const recent = this.opts.memory.recentChats(10)
     const friendship = this.opts.memory.friendsWith(incoming.fromPetId)
 
+    // Sanitize all user-typed surfaces (incoming text + names embedded in
+    // recent history) so Anthropic's safety layer doesn't 400 the request.
+    const cleanIncoming = sanitizeForLLM(incoming.text)
+    const cleanRecent   = sanitizeForLLM(JSON.stringify(recent.slice(0, 5)))
+
     const system = `${this.opts.personality}
 Archetype: ${this.opts.archetype}
 Friendship level with this pet: ${Math.min(friendship, 10)}/10
-Recent chat history: ${JSON.stringify(recent.slice(0, 5))}
+Recent chat history: ${cleanRecent}
 Rules: stay in character, max 2 sentences, be engaging and natural.`
 
     const msg = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 120,
       system,
-      messages: [{ role: 'user', content: incoming.text }],
+      messages: [{ role: 'user', content: cleanIncoming }],
     })
 
     const block = msg.content[0]
@@ -87,6 +103,7 @@ Rules: stay in character, max 2 sentences, be engaging and natural.`
 
   // Generate a conversation opener for when two pets meet
   async meetingOpener(otherPetName: string): Promise<string> {
-    return this.chat({ text: `You just met ${otherPetName} for the first time. Say hello!`, fromPetId: -1 })
+    const safeName = sanitizeForLLM(otherPetName)
+    return this.chat({ text: `You just met ${safeName} for the first time. Say hello!`, fromPetId: -1 })
   }
 }

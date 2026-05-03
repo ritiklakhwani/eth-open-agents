@@ -19,6 +19,14 @@ interface BreedingFlowProps {
   /// Optional connected wallet address; child mints to this if set, otherwise
   /// to NEXT_PUBLIC_DEMO_RECIPIENT.
   ownerAddress?: `0x${string}`
+  /// Fires after a successful mint with the URLs the WorldScene needs to play
+  /// the post-mint animation (hearts at breeding hall → child walks to park
+  /// → parents follow at halfway).
+  onMinted?: (data: {
+    childSpriteUrl: string
+    parentASpriteUrl: string | null
+    parentBSpriteUrl: string | null
+  }) => void
 }
 
 interface MintResult {
@@ -29,7 +37,7 @@ interface MintResult {
 
 type View = 'pick' | 'name' | 'minting' | 'done'
 
-export function BreedingFlow({ open, onClose, petId, ownerAddress }: BreedingFlowProps) {
+export function BreedingFlow({ open, onClose, petId, ownerAddress, onMinted }: BreedingFlowProps) {
   const [view, setView] = useState<View>('pick')
   const [pets, setPets] = useState<Pet[] | null>(null)
   const [parentA, setParentA] = useState<number | null>(petId)
@@ -120,14 +128,17 @@ export function BreedingFlow({ open, onClose, petId, ownerAddress }: BreedingFlo
 
       // 1a. Generate the child's sprite by visually blending both parents.
       // Calls /api/pets/sprite/breed which fetches both parent sprites and
-      // sends them to OpenAI gpt-image-1 multi-image edit. Falls back to
-      // archetype-default URL if both parents lack sprite_url.
-      let childSpriteUrl = `/sprites/${normalized}.png`
+      // sends them to OpenAI gpt-image-1 multi-image edit. If the blend fails
+      // (OpenAI down / rate limit / network), fall back to parent A's sprite
+      // — guaranteed to exist on disk because every pet is minted with a
+      // real generated sprite. NEVER fall back to `/sprites/<archetype>.png`
+      // — those default files are not on disk and produce missing-texture boxes.
+      const aResp = await fetch(`/api/pets/${parentA}`).then(r => r.json()) as { pet?: { spriteUrl?: string } }
+      const bResp = await fetch(`/api/pets/${parentB}`).then(r => r.json()) as { pet?: { spriteUrl?: string } }
+      const aUrl = aResp.pet?.spriteUrl
+      const bUrl = bResp.pet?.spriteUrl
+      let childSpriteUrl = aUrl ?? bUrl ?? `/sprites/${normalized}.png`
       try {
-        const aResp = await fetch(`/api/pets/${parentA}`).then(r => r.json()) as { pet?: { spriteUrl?: string } }
-        const bResp = await fetch(`/api/pets/${parentB}`).then(r => r.json()) as { pet?: { spriteUrl?: string } }
-        const aUrl = aResp.pet?.spriteUrl
-        const bUrl = bResp.pet?.spriteUrl
         if (aUrl && bUrl) {
           const breedRes = await fetch('/api/pets/sprite/breed', {
             method:  'POST',
@@ -145,7 +156,7 @@ export function BreedingFlow({ open, onClose, petId, ownerAddress }: BreedingFlo
           }
         }
       } catch (err) {
-        console.warn('[BreedingFlow] sprite blend failed, using archetype default:', err)
+        console.warn('[BreedingFlow] sprite blend failed, using parent sprite:', err)
       }
 
       // 1b. Upload child blob to 0G with parent lineage in metadata
@@ -228,6 +239,18 @@ export function BreedingFlow({ open, onClose, petId, ownerAddress }: BreedingFlo
 
       setResult(r)
       setView('done')
+
+      // Fire the post-mint animation callback. WorldScene receives parent
+      // sprite URLs + the freshly-blended child sprite URL and runs the
+      // ceremony (hearts at breeding hall → child walks to park → parents
+      // emerge at halfway).
+      if (onMinted) {
+        onMinted({
+          childSpriteUrl,
+          parentASpriteUrl: parentAPet?.spriteUrl ?? null,
+          parentBSpriteUrl: parentBPet?.spriteUrl ?? null,
+        })
+      }
     } catch (err) {
       setMintError((err as Error).message)
       setView('name')
@@ -404,7 +427,7 @@ function ParentColumn({
       >
         {label}
       </h4>
-      <div className="border-4 border-[color:var(--color-border)] bg-[color:var(--color-bg-deep)] p-2 max-h-[40vh] overflow-y-auto flex flex-col gap-1">
+      <div className="border border-[color:var(--color-yellow)]/25 bg-[rgba(10,12,46,0.5)] p-2 max-h-[40vh] overflow-y-auto flex flex-col gap-1">
         {pets.length === 0 && (
           <p className="font-[family-name:var(--font-pixel-readable)] text-sm text-[color:var(--color-ink-low)] italic p-2">
             No candidates.
@@ -415,12 +438,16 @@ function ParentColumn({
             key={p.tokenId}
             onClick={() => onSelect(p.tokenId)}
             className={[
-              'cursor-pointer text-left border-2 px-3 py-2 transition-none',
+              'cursor-pointer text-left border px-3 py-2 transition-colors',
               selected === p.tokenId
-                ? 'bg-[color:var(--color-bg-hi)]'
-                : 'bg-[color:var(--color-bg-mid)] hover:bg-[color:var(--color-bg-hi)]',
+                ? 'bg-[color:var(--color-yellow)]/10'
+                : 'bg-[rgba(10,12,46,0.45)] hover:bg-[rgba(10,12,46,0.7)]',
             ].join(' ')}
-            style={{ borderColor: selected === p.tokenId ? color : 'var(--color-border)' }}
+            style={{
+              borderColor: selected === p.tokenId
+                ? color
+                : 'rgba(255,217,60,0.15)',
+            }}
           >
             <div className="font-[family-name:var(--font-pixel)] text-xs text-[color:var(--color-ink)]">
               #{p.tokenId} {p.name}

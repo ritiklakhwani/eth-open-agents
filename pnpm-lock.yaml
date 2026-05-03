@@ -38,6 +38,9 @@ importers:
       keeperhub:
         specifier: workspace:*
         version: link:../../packages/keeperhub
+      og-storage:
+        specifier: workspace:*
+        version: link:../../packages/og-storage
       shared-types:
         specifier: workspace:*
         version: link:../../packages/shared-types

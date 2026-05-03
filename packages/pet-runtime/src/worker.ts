@@ -89,19 +89,24 @@ async function main() {
 
       activeChatPartner.id = withPetId
 
-      // Try Brain first; if Anthropic is rate-limited or unreachable, fall back
-      // to a canned opener so chat ALWAYS lands visually. Park social demo
-      // shouldn't blank out just because Haiku is overloaded.
+      // Try Brain first; if Anthropic is rate-limited / 400 / unreachable,
+      // fall back to a canned opener so chat ALWAYS lands visually.
       let opener: string
+      let brainOk = true
       try {
         opener = await brain.meetingOpener(withName)
       } catch (err) {
-        opener = pickCannedOpener(withName)
+        opener  = pickCannedOpener(withName)
+        brainOk = false
         console.warn(`[Pet ${PET_ID}] brain failed, using canned opener: ${(err as Error).message.slice(0, 60)}`)
       }
 
-      // Pace the opener so it doesn't feel like LLM autocomplete spam.
-      await sleep(pickReplyDelay())
+      // Openers fire FAST so the bubble lands while the pets are still
+      // demonstrably standing next to each other (no proximity drift kills
+      // the bubble at the gate). Tiny natural pause if Brain succeeded so it
+      // doesn't feel like a teleported message; zero delay on canned-fallback
+      // because the gate window is the most fragile part of the flow.
+      if (brainOk) await sleep(150 + Math.floor(Math.random() * 250))
       if (activeChatPartner.id !== withPetId) {
         console.log(`[Pet ${PET_ID}] opener skipped — pet ${withPetId} drifted away`)
         return
@@ -214,19 +219,22 @@ async function main() {
 
       // Brain reply with canned-fallback so we never silently drop a turn
       let reply: string
+      let brainOk = true
       try {
         reply = await brain.chat({ text, fromPetId: fromId })
       } catch (err) {
         const otherName = `pet-${fromId}`
         reply = pickCannedReply(otherName)
+        brainOk = false
         console.warn(`[Pet ${PET_ID}] reply brain failed, canned: ${(err as Error).message.slice(0, 60)}`)
       }
 
       memory.add({ kind: 'chat', content: { text, from: fromPeerId }, counterpartyPetId: fromId })
 
-      // Pace the reply so the conversation reads naturally; bail if the
-      // Hub ended the chat (proximity broke) while we were waiting.
-      await sleep(pickReplyDelay())
+      // Reply pacing: full natural delay when Brain succeeded; near-instant
+      // on canned-fallback so the bubble lands before proximity drift
+      // closes the gate. Bail if the Hub ended the chat while waiting.
+      await sleep(brainOk ? pickReplyDelay() : 200)
       if (activeChatPartner.id !== fromId) {
         console.log(`[Pet ${PET_ID}] reply skipped — pet ${fromId} drifted away`)
         return
@@ -279,7 +287,12 @@ async function main() {
     }
   }
 
-  // Poll AXL /recv every 5s
+  // Poll AXL /recv every 200ms — was 5s which made each conversation turn
+  // wait up to 5 seconds for the next message to be picked up. With pets
+  // wandering between turns, that latency caused chats to die after 1-2
+  // exchanges (pets drifted past PROXIMITY_BREAK_PX while waiting). 200ms
+  // poll keeps the AXL receive path tight; the hub-relay fallback path is
+  // already push-based and unaffected.
   const pollRecv = setInterval(async () => {
     try {
       const incoming = await axl.recv()
@@ -288,7 +301,7 @@ async function main() {
     } catch (err) {
       console.error(`[Pet ${PET_ID}] recv error:`, (err as Error).message)
     }
-  }, 5_000)
+  }, 200)
 
   // Tick mood/energy/hunger every 30 min
   const tickInterval = setInterval(() => {

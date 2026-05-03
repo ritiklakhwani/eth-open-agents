@@ -12,11 +12,13 @@ interface PixelButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variantStyles: Record<Variant, string> = {
-  primary:   'bg-[color:var(--color-pink)] text-[color:var(--color-bg-deep)] border-[color:var(--color-bg-deep)] hover:bg-[color:var(--color-pink-hi)]',
-  secondary: 'bg-[color:var(--color-cyan)] text-[color:var(--color-bg-deep)] border-[color:var(--color-bg-deep)] hover:bg-[color:var(--color-cyan-hi)]',
-  success:   'bg-[color:var(--color-lime)] text-[color:var(--color-bg-deep)] border-[color:var(--color-bg-deep)] hover:brightness-110',
-  danger:    'bg-[color:var(--color-red)]  text-[color:var(--color-ink)]    border-[color:var(--color-bg-deep)] hover:brightness-110',
-  ghost:     'bg-[color:var(--color-bg-mid)] text-[color:var(--color-ink)]  border-[color:var(--color-border)]   hover:bg-[color:var(--color-bg-hi)] hover:border-[color:var(--color-border-hi)]',
+  // Warm yellow — matches the lamp-glow HUD palette. Used as the dominant
+  // call-to-action across modals (Compose, Next, Confirm, etc.).
+  primary:   'bg-[color:var(--color-yellow)] text-[color:var(--color-bg-deep)] border-[color:var(--color-bg-deep)] hover:brightness-105',
+  secondary: 'bg-[color:var(--color-cyan)]   text-[color:var(--color-bg-deep)] border-[color:var(--color-bg-deep)] hover:bg-[color:var(--color-cyan-hi)]',
+  success:   'bg-[color:var(--color-lime)]   text-[color:var(--color-bg-deep)] border-[color:var(--color-bg-deep)] hover:brightness-110',
+  danger:    'bg-[color:var(--color-red)]    text-[color:var(--color-ink)]    border-[color:var(--color-bg-deep)] hover:brightness-110',
+  ghost:     'bg-[rgba(10,12,46,0.55)]       text-[color:var(--color-ink)]    border-[color:var(--color-yellow)]/40 hover:bg-[rgba(10,12,46,0.75)] hover:border-[color:var(--color-yellow)]/60',
 }
 
 const sizeStyles: Record<Size, string> = {

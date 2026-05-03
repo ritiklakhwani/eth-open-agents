@@ -91,8 +91,8 @@ export async function GET(
       cache: 'no-store',
     })
     if (res.ok) {
-      const row = (await res.json()) as HubPetRow
-      return Response.json({ pet: normalize(row), source: 'hub', friendsCount: 0 })
+      const row = (await res.json()) as HubPetRow & { friendsCount?: number }
+      return Response.json({ pet: normalize(row), source: 'hub', friendsCount: row.friendsCount ?? 0 })
     }
     // 404 / 5xx — fall through to mock
   } catch {

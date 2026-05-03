@@ -2,12 +2,15 @@
 
 import { useEffect, useState } from 'react'
 import { PixelDialog, PixelButton, PixelCard, PixelInput } from './ui'
+import { etherscanTxLink } from '@/lib/explorerLinks'
 
 interface MailboxFlowProps {
   open: boolean
   onClose: () => void
   petId: number
 }
+
+const KEEPERHUB_WORKFLOW_BASE = 'https://app.keeperhub.com/workflows'
 
 interface InboxItem {
   id: string
@@ -16,6 +19,12 @@ interface InboxItem {
   giftAmountUsdc: number
   deliveredAt: number
   status: string
+  /// Sepolia tx hash for the actual on-chain ERC20 transfer KeeperHub fired.
+  /// Clickable Etherscan proof — the strongest single demo artefact.
+  txHash: string | null
+  /// KeeperHub workflow id — links to the KeeperHub dashboard so judges can
+  /// inspect the autonomous workflow graph + execution log.
+  workflowId: string
 }
 interface PendingItem {
   id: string
@@ -24,6 +33,7 @@ interface PendingItem {
   giftAmountUsdc: number
   triggerCondition: string
   status: string
+  workflowId: string
 }
 interface InboxResp { inbox: InboxItem[]; pending: PendingItem[]; source: 'hub' | 'stub' }
 
@@ -152,6 +162,7 @@ export function MailboxFlow({ open, onClose, petId }: MailboxFlowProps) {
                           {timeAgo(g.deliveredAt)}
                         </span>
                       </div>
+                      <ProofLinks workflowId={g.workflowId} txHash={g.txHash} />
                     </div>
                   </PixelCard>
                 ))}
@@ -167,6 +178,7 @@ export function MailboxFlow({ open, onClose, petId }: MailboxFlowProps) {
                         &ldquo;{g.message}&rdquo;
                       </p>
                       <Row label="WHEN" value={g.triggerCondition} valueColor="var(--color-pink)" />
+                      <ProofLinks workflowId={g.workflowId} txHash={null} />
                     </div>
                   </PixelCard>
                 ))}
@@ -298,4 +310,34 @@ function timeAgo(ts: number): string {
   const h = Math.round(m / 60)
   if (h < 24) return `${h}h ago`
   return `${Math.round(h / 24)}d ago`
+}
+
+/// Two clickable proof links rendered under each gift card.
+///   1. KeeperHub — opens the workflow graph (always present)
+///   2. Etherscan — opens the on-chain ERC20 transfer tx (only after delivery)
+/// Designed for judges: a single click takes them to a live external service
+/// that confirms the demo isn't a fake.
+function ProofLinks({ workflowId, txHash }: { workflowId: string; txHash: string | null }) {
+  return (
+    <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-[family-name:var(--font-pixel)] uppercase tracking-widest">
+      <a
+        href={`${KEEPERHUB_WORKFLOW_BASE}/${workflowId}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="border border-[color:var(--color-cyan)]/50 bg-[rgba(10,12,46,0.5)] px-2 py-1 text-[color:var(--color-cyan)] hover:bg-[color:var(--color-cyan)]/10"
+      >
+        ↗ KEEPERHUB WORKFLOW
+      </a>
+      {txHash && (
+        <a
+          href={etherscanTxLink(txHash)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="border border-[color:var(--color-lime)]/50 bg-[rgba(10,12,46,0.5)] px-2 py-1 text-[color:var(--color-lime)] hover:bg-[color:var(--color-lime)]/10"
+        >
+          ↗ ON-CHAIN TX ({short(txHash)})
+        </a>
+      )}
+    </div>
+  )
 }

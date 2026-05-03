@@ -111,7 +111,7 @@ export async function POST(req: Request) {
 
     const exec = await callKeeperHub<{ executionId?: string; status?: string; output?: unknown }>(
       'execute_workflow',
-      { id: target.id },
+      { workflowId: target.id },
     )
     const executionId = exec.executionId ?? null
     const mailboxMarkedDelivered = body.kind === 'mailbox'

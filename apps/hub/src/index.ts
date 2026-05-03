@@ -38,6 +38,10 @@ type MailboxDeliveredBody = {
   toPetId?: number
   amountUSDC?: string | number
   executionId?: string | null
+  /// Sepolia tx hash of the actual ERC20 transfer fired by KeeperHub's
+  /// transfer-1 node. Surface this in the inbox so judges can click and
+  /// see the on-chain proof on Etherscan.
+  txHash?: string | null
 }
 
 type MailboxWorkflowPayload = {
@@ -47,6 +51,7 @@ type MailboxWorkflowPayload = {
   deliveryMode?: string
   deliveredAt?: number
   executionId?: string | null
+  txHash?: string | null
   lastAutoDeliveryAttemptAt?: number
   lastAutoDeliveryError?: string
 }
@@ -74,7 +79,7 @@ function hasPublicHubBaseUrl(): boolean {
 function markMailboxWorkflowDelivered(body: MailboxDeliveredBody):
   | { ok: true; workflowId: string; status: 'completed'; deliveredAt: number }
   | { ok: false; error: string } {
-  const { workflowId, workflowName, fromPetId, toPetId, amountUSDC, executionId } = body
+  const { workflowId, workflowName, fromPetId, toPetId, amountUSDC, executionId, txHash } = body
 
   type Row = { id: string; pet_id: number; payload: string | null }
   let row: Row | undefined
@@ -115,6 +120,7 @@ function markMailboxWorkflowDelivered(body: MailboxDeliveredBody):
     ...payload,
     deliveredAt,
     executionId: executionId ?? payload.executionId ?? null,
+    txHash:      txHash ?? (payload as { txHash?: string }).txHash ?? null,
   }
 
   db.prepare(
@@ -187,9 +193,26 @@ function startMailboxAutoDelivery() {
 
           const client = await connectKeeperHub()
           let executionId: string | null = null
+          let txHash: string | null = null
           try {
-            const exec = await client.callTool('execute_workflow', { id: row.id }) as { executionId?: string }
+            const exec = await client.callTool('execute_workflow', { workflowId: row.id }) as { executionId?: string }
             executionId = exec.executionId ?? null
+
+            // Poll until execution finishes, then read logs to extract the
+            // transfer node's on-chain tx hash. Without this the judge has
+            // no clickable proof — just a workflow status.
+            if (executionId) {
+              for (let i = 0; i < 12; i++) {
+                await new Promise(r => setTimeout(r, 3_000))
+                const st = await client.callTool('get_execution_status', { executionId }) as { status?: string }
+                if (st.status && !['running', 'pending', 'queued'].includes(st.status)) break
+              }
+              const logs = await client.callTool('get_execution_logs', { executionId }) as {
+                logs?: Array<{ nodeId: string; output: { transactionHash?: string } | null }>
+              }
+              const transferLog = (logs.logs ?? []).find(l => l.nodeId === 'transfer-1')
+              txHash = transferLog?.output?.transactionHash ?? null
+            }
           } finally {
             await client.close()
           }
@@ -200,11 +223,12 @@ function startMailboxAutoDelivery() {
             toPetId,
             amountUSDC: payload.amountUSDC,
             executionId,
+            txHash,
           })
           if (!result.ok) {
             console.warn(`[Mailbox] Auto-delivery could not mark ${row.id}: ${result.error}`)
           } else {
-            console.log(`[Mailbox] Auto-delivered workflow ${row.id} to pet ${toPetId} via KeeperHub execute_workflow`)
+            console.log(`[Mailbox] Auto-delivered workflow ${row.id} to pet ${toPetId} (tx ${txHash ?? 'pending'})`)
           }
         } catch (err) {
           const latestPayload = parseMailboxPayload(row.payload)
@@ -243,9 +267,16 @@ app.get('/api/keeperhub/webhook/health', () => ({
 }))
 
 app.get<{ Params: { id: string } }>('/api/pets/:id', (req, reply) => {
-  const pet = db.prepare('SELECT * FROM pets WHERE token_id = ?').get(req.params.id)
+  const tokenId = Number(req.params.id)
+  const pet = db.prepare('SELECT * FROM pets WHERE token_id = ?').get(tokenId)
   if (!pet) return reply.status(404).send({ error: 'Pet not found' })
-  return pet
+  // Count distinct partners with strength >= 3 — the threshold the
+  // pet-runtime memory module uses to fire the first ENS attestation.
+  // Anyone the pet has chatted with at least 3 times counts as a friend.
+  const friends = db.prepare(
+    'SELECT COUNT(*) AS n FROM friendships WHERE (pet_a = ? OR pet_b = ?) AND strength >= 3',
+  ).get(tokenId, tokenId) as { n: number } | undefined
+  return { ...(pet as object), friendsCount: friends?.n ?? 0 }
 })
 
 // All keeperhub workflows — used by the KeeperHub integration panel to show
@@ -367,19 +398,33 @@ app.get<{ Querystring: { petId: string } }>(
       petNames.set(p.token_id, p.ens_name ?? p.name ?? `pet-${p.token_id}`)
     }
 
-    interface InboxItem { id: string; from: string; message: string; giftAmountUsdc: number; deliveredAt: number; status: string }
-    interface PendingItem { id: string; to: string; message: string; giftAmountUsdc: number; triggerCondition: string; status: string }
+    interface InboxItem {
+      id:            string
+      from:          string
+      message:       string
+      giftAmountUsdc: number
+      deliveredAt:   number
+      status:        string
+      /// Sepolia tx hash from KeeperHub's transfer node — clickable Etherscan
+      /// proof for judges. Null if delivery hasn't fired yet (status=active).
+      txHash:        string | null
+      /// KeeperHub workflow id — surfaces a clickable link to the workflow
+      /// graph in KeeperHub dashboard, showing the conditional + transfer.
+      workflowId:    string
+    }
+    interface PendingItem { id: string; to: string; message: string; giftAmountUsdc: number; triggerCondition: string; status: string; workflowId: string }
     const inbox: InboxItem[] = []
     const pending: PendingItem[] = []
 
     const deliveredStatuses = new Set(['completed', 'delivered'])
 
     for (const r of rows) {
-      let payload: { toPetId?: number; amountUSDC?: string | number; deliveredAt?: number; message?: string } = {}
+      let payload: { toPetId?: number; amountUSDC?: string | number; deliveredAt?: number; message?: string; txHash?: string | null } = {}
       try { payload = JSON.parse(r.payload ?? '{}') } catch {}
       const toPetId = typeof payload.toPetId === 'number' ? payload.toPetId : undefined
       const amount = Number(payload.amountUSDC ?? 0) || 0
       const message = typeof payload.message === 'string' ? payload.message : ''
+      const txHash = typeof payload.txHash === 'string' ? payload.txHash : null
 
       if (toPetId === petId && deliveredStatuses.has(r.status)) {
         inbox.push({
@@ -389,6 +434,8 @@ app.get<{ Querystring: { petId: string } }>(
           giftAmountUsdc: amount,
           deliveredAt: typeof payload.deliveredAt === 'number' ? payload.deliveredAt : r.created_at,
           status: r.status,
+          txHash,
+          workflowId: r.id,
         })
       }
 
@@ -400,6 +447,7 @@ app.get<{ Querystring: { petId: string } }>(
           giftAmountUsdc: amount,
           triggerCondition: 'recipient ENS lastSeenBlock within 30 blocks of head',
           status: r.status,
+          workflowId: r.id,
         })
       }
     }
@@ -719,6 +767,11 @@ async function main() {
   const inConversation = new Map<number, number>()  // petId → expiresAt
   const CONVO_PAUSE_MS = 10_000
 
+  // Set later when runBrokerPass is wired up. Called from socket move
+  // handler to fire chats immediately on player movement (push-based)
+  // instead of waiting up to 100ms for the next scheduled broker tick.
+  let pushBroker: (() => void) | null = null
+
   io.on('connection', (socket) => {
     let playerId: number | undefined
 
@@ -736,6 +789,10 @@ async function main() {
       // Update zone in DB
       db.prepare('UPDATE pets SET pos_x = ?, pos_y = ?, zone = ? WHERE token_id = ?')
         .run(x, y, zone, playerId)
+      // Push-based broker fire — react to player approach immediately rather
+      // than waiting for the next 100ms scheduled tick. Cuts perceived
+      // chat-fire latency by 0-100ms on player↔NPC encounters.
+      pushBroker?.()
     })
 
     socket.on('disconnect', () => {
@@ -789,19 +846,57 @@ async function main() {
 
   // ── Goal-based wander state ────────────────────────────────────────────
   // Each pet has a personality (speed + loiter ranges) set at first spawn,
-  // plus a current target picked from a hotspot list spread across the map.
-  // Result: pets walk purposefully to different parts of the world, pause
-  // for varying amounts of time, cross paths organically. No two pets move
-  // in lockstep, and they cover the whole map — not just the park.
+  // plus a current target picked from a CELL GRID with recent-cell exclusion
+  // so the pet is forced to explore the whole map instead of returning to
+  // the same dense hotspot regions. Combined with the chat caps in endChat
+  // and the duration sweep, this keeps the world looking alive everywhere.
   interface WanderState {
     target:      { x: number; y: number; linger?: boolean }
     loiterUntil: number  // ms timestamp; stand still until then
-    baseSpeed:   number  // pixels per tick (~10Hz tick → 25-50 px/sec)
+    baseSpeed:   number  // pixels per tick (~10Hz tick)
     // Personality dials, rolled once on first spawn:
     minLoiter:   number  // min ms to loiter at a target
     maxLoiter:   number  // max ms to loiter at a target
+    // Last few grid cells this pet visited — fallback exclusion only used
+    // when popping the zoneDeck doesn't yield a meaningful destination.
+    recentCells: number[]
+    // Shuffled queue of NAMED_ZONES indices. Pet pops from the head to
+    // pick its next destination; when empty, a fresh shuffle is drawn.
+    zoneDeck:    number[]
+    lastZone:    number  // index of the most recently visited zone, -1 = none
+    // Index of the zone this pet is CURRENTLY heading to. Used to release
+    // its slot in zoneTargetCount when it picks a new zone or gets GC'd.
+    currentZoneIdx: number
   }
   const wanderStates = new Map<number, WanderState>()
+
+  // ── Target reservation ───────────────────────────────────────────────
+  // Counts how many pets are CURRENTLY targeting each zone. pickFreshTarget
+  // refuses to pick a zone whose count is at MAX_PETS_PER_ZONE, guaranteeing
+  // pets spread across the map regardless of statistical luck. With 32
+  // pets and 14 zones * 2 = 28 slots, ~most pets are always reserved to
+  // distinct zones; the few extras pick whatever still has room.
+  const zoneTargetCount = new Map<number, number>()
+  const MAX_PETS_PER_ZONE = 2
+
+  function reserveZone(idx: number) {
+    zoneTargetCount.set(idx, (zoneTargetCount.get(idx) ?? 0) + 1)
+  }
+  function releaseZone(idx: number) {
+    if (idx < 0) return
+    const c = zoneTargetCount.get(idx) ?? 0
+    if (c <= 1) zoneTargetCount.delete(idx)
+    else zoneTargetCount.set(idx, c - 1)
+  }
+
+  /// Last ms timestamp at which the wander tick actually MOVED a pet (i.e.
+  /// updated its position by walking). Used to detect long-stuck pets that
+  /// somehow ended up neither chatting nor moving — e.g., a chat ended with
+  /// a malformed state, or the pet's target is unreachable. After 12s of
+  /// no movement we force a fresh far target so the world stays alive even
+  /// if some other safety net fails.
+  const wanderLastMovedAt = new Map<number, number>()
+  const STATIONARY_RESCUE_MS = 12_000
 
   // Hotspot destinations — interesting points spread across the WHOLE map,
   // grouped by region. Pets pick one + small jitter as their next target,
@@ -855,10 +950,175 @@ async function main() {
   const WANDER_X_MIN = 100, WANDER_X_MAX = 1290
   const WANDER_Y_MIN = 180, WANDER_Y_MAX = 750
 
+  // ── Exploration grid ──────────────────────────────────────────────────
+  // Divide the wander area into a 5×3 grid (15 cells of ~238×190 px each).
+  // Each pet remembers its last RECENT_CELL_MEMORY cells and avoids them
+  // when picking a new target. This GUARANTEES coverage spread instead of
+  // relying on hotspot density (which always favoured the SOCIETY region
+  // and central park, producing the piles you saw).
+  const GRID_COLS            = 5
+  const GRID_ROWS            = 3
+  const TOTAL_CELLS          = GRID_COLS * GRID_ROWS    // 15
+  const CELL_W               = (WANDER_X_MAX - WANDER_X_MIN) / GRID_COLS
+  const CELL_H               = (WANDER_Y_MAX - WANDER_Y_MIN) / GRID_ROWS
+  const RECENT_CELL_MEMORY   = 6   // 40% of the grid — strong avoidance
+
+  function cellOf(x: number, y: number): number {
+    const col = Math.min(GRID_COLS - 1, Math.max(0, Math.floor((x - WANDER_X_MIN) / CELL_W)))
+    const row = Math.min(GRID_ROWS - 1, Math.max(0, Math.floor((y - WANDER_Y_MIN) / CELL_H)))
+    return row * GRID_COLS + col
+  }
+
+  function randomPointInCell(cell: number): { x: number; y: number } {
+    const col = cell % GRID_COLS
+    const row = Math.floor(cell / GRID_COLS)
+    // 12% padding from cell edges so successive picks in adjacent cells
+    // still feel like distinct destinations rather than border-hugging.
+    const padX = CELL_W * 0.12
+    const padY = CELL_H * 0.12
+    return {
+      x: WANDER_X_MIN + col * CELL_W + padX + Math.random() * (CELL_W - 2 * padX),
+      y: WANDER_Y_MIN + row * CELL_H + padY + Math.random() * (CELL_H - 2 * padY),
+    }
+  }
+
+  // ── Named zones — every pet rotates through these as a shuffled tour ──
+  // Spread across the entire map so different pets are visibly heading to
+  // different landmarks (society, breeding, battlefield, mailbox, pond...)
+  // at any given moment. Replaces hotspot-density picking which was biased
+  // toward central park / society area.
+  interface NamedZone { name: string; x: number; y: number; jitter: number }
+  // 16 zones laid out around the PERIMETER + a handful of mid-points.
+  // Old layout had 6+ zones clustered in the central band, so transit
+  // paths between any pair funnelled through the middle of the map and
+  // visually piled up there. This perimeter layout means most A→B legs
+  // now skirt the edges instead of crossing the center.
+  // Map bounds: x 100-1290, y 180-750. Perimeter stations placed at the
+  // edges with one mid-station per side.
+  const NAMED_ZONES: NamedZone[] = [
+    // Top edge, left → right
+    { name: 'nw-corner',     x:  170, y: 220, jitter: 130 },
+    { name: 'society',       x:  330, y: 230, jitter: 140 },
+    { name: 'partner-row',   x:  560, y: 215, jitter: 140 },
+    { name: 'north-path',    x:  830, y: 220, jitter: 140 },
+    { name: 'ne-corner',     x: 1180, y: 230, jitter: 140 },
+
+    // Right edge, top → bottom
+    { name: 'breeding',      x: 1230, y: 410, jitter: 140 },
+    { name: 'battlefield',   x: 1230, y: 640, jitter: 150 },
+
+    // Bottom edge, right → left
+    { name: 'se-corner',     x: 1000, y: 700, jitter: 140 },
+    { name: 'south-path',    x:  830, y: 720, jitter: 140 },
+    { name: 'marketplace',   x:  500, y: 700, jitter: 140 },
+    { name: 'sw-corner',     x:  280, y: 720, jitter: 130 },
+    { name: 'pond',          x:  170, y: 700, jitter: 120 },
+
+    // Left edge, bottom → top
+    { name: 'west-houses',   x:  170, y: 460, jitter: 140 },
+
+    // Three mid-points kept for visual interest (signage labels still hit)
+    // — but 1-pet cap effectively because there are 13 perimeter slots
+    // already covering 26 pets at the 2-cap.
+    { name: 'mailbox',       x:  640, y: 460, jitter: 140 },
+    { name: 'central-park',  x:  830, y: 580, jitter: 150 },
+    { name: 'east-arena',    x: 1050, y: 500, jitter: 130 },
+  ]
+
+  /// Fisher-Yates shuffle, optionally excluding one index from the front
+  /// position so two consecutive picks (across deck refills) can't be the
+  /// same zone.
+  function shuffledZoneDeck(excludeFirst: number): number[] {
+    const deck = NAMED_ZONES.map((_, i) => i)
+    for (let i = deck.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[deck[i], deck[j]] = [deck[j], deck[i]]
+    }
+    if (excludeFirst >= 0 && deck[0] === excludeFirst && deck.length > 1) {
+      // Swap with a later position so we never start a fresh deck on the
+      // same zone the previous deck ended on.
+      const swapIdx = 1 + Math.floor(Math.random() * (deck.length - 1))
+      ;[deck[0], deck[swapIdx]] = [deck[swapIdx], deck[0]]
+    }
+    return deck
+  }
+
+  function popNextZone(state: WanderState): NamedZone {
+    // Release the previous reservation first.
+    releaseZone(state.currentZoneIdx)
+
+    // Try up to NAMED_ZONES.length picks: skip any zone that's already at
+    // MAX_PETS_PER_ZONE. Refills the deck as needed.
+    for (let attempt = 0; attempt < NAMED_ZONES.length * 2; attempt++) {
+      if (state.zoneDeck.length === 0) {
+        state.zoneDeck = shuffledZoneDeck(state.lastZone)
+      }
+      const idx = state.zoneDeck.shift()!
+      const count = zoneTargetCount.get(idx) ?? 0
+      if (count < MAX_PETS_PER_ZONE) {
+        reserveZone(idx)
+        state.lastZone       = idx
+        state.currentZoneIdx = idx
+        return NAMED_ZONES[idx]
+      }
+      // Zone full — try the next one in the deck. Skipped zones are gone
+      // from this deck but will reappear in the next shuffle.
+    }
+    // Pathological case: every zone is at cap (would need 28+ pets all
+    // reserved). Pick anything to avoid an infinite loop.
+    const fallbackIdx = Math.floor(Math.random() * NAMED_ZONES.length)
+    reserveZone(fallbackIdx)
+    state.lastZone       = fallbackIdx
+    state.currentZoneIdx = fallbackIdx
+    return NAMED_ZONES[fallbackIdx]
+  }
+
+  /// Pick the next exploration target. Pulls from this pet's shuffled
+  /// zone deck so each pet rotates through every named landmark over a
+  /// full cycle, then re-shuffles. The cell grid + recentCells fallback
+  /// only kicks in for the rare case where the chosen zone happens to
+  /// match the current cell (avoids "next target is right where I am").
+  function pickFreshTarget(currentX: number, currentY: number, state: WanderState): { x: number; y: number; linger?: boolean } {
+    let zone = popNextZone(state)
+    // If the pet is already standing inside this zone's jitter radius,
+    // pop the next zone in the deck instead so the leg has meaningful
+    // distance — keeps the world's motion visible.
+    let safety = 0
+    while (Math.hypot(zone.x - currentX, zone.y - currentY) < zone.jitter && safety < 3) {
+      zone = popNextZone(state)
+      safety++
+    }
+    // Track the cell so the rescue/anti-clump heuristics still work.
+    const point = {
+      x: zone.x + (Math.random() - 0.5) * zone.jitter * 2,
+      y: zone.y + (Math.random() - 0.5) * zone.jitter * 2,
+    }
+    state.recentCells.push(cellOf(point.x, point.y))
+    if (state.recentCells.length > RECENT_CELL_MEMORY) state.recentCells.shift()
+    return point
+  }
+
+  /// Pick the cell roughly opposite the pet's current position — used
+  /// after a chat ends so the pet actively scatters away from the chat
+  /// spot instead of picking another nearby cluster. Adds a random fresh
+  /// cell as fallback if the opposite is in recent memory.
+  function pickOppositeTarget(currentX: number, currentY: number, state: WanderState): { x: number; y: number } {
+    const here       = cellOf(currentX, currentY)
+    const hereCol    = here % GRID_COLS
+    const hereRow    = Math.floor(here / GRID_COLS)
+    const oppCol     = GRID_COLS - 1 - hereCol
+    const oppRow     = GRID_ROWS - 1 - hereRow
+    const oppCell    = oppRow * GRID_COLS + oppCol
+    state.recentCells.push(oppCell)
+    if (state.recentCells.length > RECENT_CELL_MEMORY) state.recentCells.shift()
+    return randomPointInCell(oppCell)
+  }
+
+  /// Legacy hotspot picker — retained for the very first spawn target so
+  /// pets START at recognisable landmarks. After the first move, all
+  /// targets come from pickFreshTarget / pickOppositeTarget.
   function pickWanderTarget(): { x: number; y: number; linger?: boolean } {
     const h = HOTSPOTS[Math.floor(Math.random() * HOTSPOTS.length)]
-    // ±60px jitter (was ±25) so pets don't snap to nearly-identical coords
-    // when they pick the same hotspot. Spreads out crowds.
     return {
       x:      h.x + (Math.random() - 0.5) * 120,
       y:      h.y + (Math.random() - 0.5) * 120,
@@ -869,19 +1129,42 @@ async function main() {
   function ensureWanderState(petId: number): WanderState {
     let s = wanderStates.get(petId)
     if (!s) {
-      // Personality roll — varied speed only. ALL pets keep moving almost
-      // continuously: tiny natural hesitation between targets (200-700ms),
-      // never a multi-second idle. The only thing that stops a pet is an
-      // active chat (handled separately via inConversation).
+      // Personality roll — fast + responsive defaults so the world feels
+      // alive even after long uptime. Loiter is brief; the only thing
+      // that stops a pet for any meaningful time is an active chat.
+      // Each pet gets its OWN shuffled zone deck so different pets are
+      // headed to different zones at any given moment — visible spread
+      // across society / mailbox / breeding / battlefield / pond / etc.
+      // Initial zone — also reserve a slot so it counts toward the cap.
+      // Pop from a fresh shuffled deck respecting the reservation limit.
+      const tmpDeck = shuffledZoneDeck(-1)
+      let firstIdx = -1
+      for (const idx of tmpDeck) {
+        if ((zoneTargetCount.get(idx) ?? 0) < MAX_PETS_PER_ZONE) {
+          firstIdx = idx
+          break
+        }
+      }
+      if (firstIdx < 0) firstIdx = tmpDeck[0] ?? 0
+      reserveZone(firstIdx)
+      const firstZone = NAMED_ZONES[firstIdx]
+      // Remove the chosen zone from the deck before storing
+      const zoneDeck = tmpDeck.filter((i) => i !== firstIdx)
+
       s = {
-        target:      pickWanderTarget(),
+        target: {
+          x: firstZone.x + (Math.random() - 0.5) * firstZone.jitter * 2,
+          y: firstZone.y + (Math.random() - 0.5) * firstZone.jitter * 2,
+        },
         // Stagger the first move 0-1500ms so they don't all set off at once.
         loiterUntil: Date.now() + Math.random() * 1500,
-        // 2.5-5.0 px / 100ms tick = 25-50 px/sec
-        baseSpeed:   2.5 + Math.random() * 2.5,
-        // Brief hesitation only — pet flicks to next target almost immediately.
-        minLoiter:   200,
-        maxLoiter:   700,
+        baseSpeed:   3.0 + Math.random() * 5.5,
+        minLoiter:   120,
+        maxLoiter:   450,
+        recentCells: [],
+        zoneDeck,
+        lastZone:       firstIdx,
+        currentZoneIdx: firstIdx,
       }
       wanderStates.set(petId, s)
     }
@@ -900,6 +1183,9 @@ async function main() {
         "SELECT 1 FROM pets WHERE token_id = ? AND peer_id IS NOT NULL AND peer_id != ''"
       ).get(petId)
       if (!hasWorker && !browserDriven.has(petId) && stale) {
+        // Release the pet's zone reservation before tearing down its state.
+        const ws = wanderStates.get(petId)
+        if (ws) releaseZone(ws.currentZoneIdx)
         positions.delete(petId)
         lastMoveAt.delete(petId)
         wanderStates.delete(petId)
@@ -914,6 +1200,8 @@ async function main() {
       const last = lastMoveAt.get(petId) ?? 0
       const recentlyDriven = now - last < IDLE_THRESHOLD_MS
       if (browserDriven.has(petId) && recentlyDriven) {
+        const ws = wanderStates.get(petId)
+        if (ws) releaseZone(ws.currentZoneIdx)
         wanderStates.delete(petId)
         continue
       }
@@ -925,6 +1213,34 @@ async function main() {
 
       const state = ensureWanderState(petId)
 
+      // ── Always-on soft separation ─────────────────────────────────────
+      // Push the pet a fraction of a pixel away from very-close neighbours
+      // even while loitering or in chat-cooldown. Stops pets from visually
+      // stacking on top of each other at popular zone arrival points.
+      // Only fires when the closest neighbour is < 36 px (sprites are 42px
+      // wide, so this kicks in just before they overlap).
+      let softX = 0, softY = 0, closest = Infinity
+      for (const [otherId, otherPos] of positions) {
+        if (otherId === petId) continue
+        const ddx = pos.x - otherPos.x
+        const ddy = pos.y - otherPos.y
+        const dd  = Math.hypot(ddx, ddy)
+        if (dd >= 36 || dd < 0.5) continue
+        if (dd < closest) closest = dd
+        // Quadratic falloff — much stronger when very close
+        const force = ((36 - dd) / 36) ** 2 * 1.6
+        softX += (ddx / dd) * force
+        softY += (ddy / dd) * force
+      }
+      if (closest < 36) {
+        const nx = clamp(pos.x + softX, WANDER_X_MIN, WANDER_X_MAX)
+        const ny = clamp(pos.y + softY, WANDER_Y_MIN, WANDER_Y_MAX)
+        positions.set(petId, { x: nx, y: ny, zone: pos.zone })
+        wanderLastMovedAt.set(petId, now)
+        // Don't `continue` — fall through to normal walking/loiter logic
+        // so this pet still progresses toward its target between pushes.
+      }
+
       // Loitering at last target → stand still until the timer expires.
       if (state.loiterUntil > now) continue
 
@@ -935,9 +1251,9 @@ async function main() {
         // Arrived. Snap, pick a new target, brief hesitation, then move on.
         positions.set(petId, { x: state.target.x, y: state.target.y, zone: pos.zone })
 
-        // If crowded at the arrival point, pick a target FAR from the cluster
-        // center so the next walk leg leaves the crowd. No teleport — the
-        // pet just walks away naturally during the next tick.
+        // If crowded at the arrival point, pick the OPPOSITE cell (no
+        // hesitation) so the pet leaves immediately. Otherwise pick a
+        // fresh cell that this pet hasn't visited recently.
         let crowded = false
         for (const [otherId, otherPos] of positions) {
           if (otherId === petId) continue
@@ -947,18 +1263,10 @@ async function main() {
           }
         }
         if (crowded) {
-          // Try a few targets, take the one furthest from current position.
-          let best = pickWanderTarget()
-          let bestDist = Math.hypot(best.x - state.target.x, best.y - state.target.y)
-          for (let i = 0; i < 3; i++) {
-            const candidate = pickWanderTarget()
-            const cd = Math.hypot(candidate.x - state.target.x, candidate.y - state.target.y)
-            if (cd > bestDist) { best = candidate; bestDist = cd }
-          }
-          state.target = best
-          state.loiterUntil = now + 50  // basically no hesitation when crowded
+          state.target      = pickOppositeTarget(state.target.x, state.target.y, state)
+          state.loiterUntil = now + 50
         } else {
-          state.target = pickWanderTarget()
+          state.target = pickFreshTarget(state.target.x, state.target.y, state)
           state.loiterUntil = now + state.minLoiter
                                   + Math.random() * (state.maxLoiter - state.minLoiter)
         }
@@ -990,6 +1298,31 @@ async function main() {
       const nx = clamp(pos.x + stepX, WANDER_X_MIN, WANDER_X_MAX)
       const ny = clamp(pos.y + stepY, WANDER_Y_MIN, WANDER_Y_MAX)
       positions.set(petId, { x: nx, y: ny, zone: pos.zone })
+      wanderLastMovedAt.set(petId, now)
+    }
+
+    // ── Stationary-pet rescue ─────────────────────────────────────────────
+    // Catch any pet that's neither chatting, browser-driven, nor walking.
+    // Belt-and-suspenders for race conditions where inConversation/activeChats
+    // get out of sync with state.target — without this a single bug anywhere
+    // in the chat path can re-create the pile-up problem.
+    for (const [petId, pos] of positions) {
+      if (browserDriven.has(petId) && (now - (lastMoveAt.get(petId) ?? 0) < IDLE_THRESHOLD_MS)) continue
+      if ((inConversation.get(petId) ?? 0) > now) continue
+      if (activeChats.has(petId)) continue
+      const lastMoved = wanderLastMovedAt.get(petId) ?? now
+      if (now - lastMoved < STATIONARY_RESCUE_MS) continue
+      // Pet has been stationary too long — force a fresh zone (respects
+      // reservation count via popNextZone, unlike pickOppositeTarget).
+      const state = ensureWanderState(petId)
+      const zone  = popNextZone(state)
+      state.target = {
+        x: zone.x + (Math.random() - 0.5) * zone.jitter * 2,
+        y: zone.y + (Math.random() - 0.5) * zone.jitter * 2,
+      }
+      state.loiterUntil = now + 50
+      wanderLastMovedAt.set(petId, now) // arm timer so we don't spam-rescue
+      console.log(`[Wander] Rescued stuck pet ${petId} at (${pos.x.toFixed(0)},${pos.y.toFixed(0)}) -> (${state.target.x.toFixed(0)},${state.target.y.toFixed(0)})`)
     }
   }
 
@@ -1010,14 +1343,30 @@ async function main() {
   // IPC kills the in-flight reply at the worker so no stale bubble lands).
   // Canned-opener fallback in the worker means even a 429 from Anthropic
   // doesn't blank the chat — bubble still renders.
-  //  - PROXIMITY_INIT_PX 140  (fire as soon as two pets approach)
-  //  - PROXIMITY_BREAK_PX 220 (don't end on small wander drift mid-chat)
-  //  - PROXIMITY_COOLDOWN_MS 3s (allow re-conversation after a brief gap)
-  //  - BROKER_THROTTLE_MS 250ms (effectively per-tick — chat starts fast)
-  const PROXIMITY_INIT_PX     = 140
-  const PROXIMITY_BREAK_PX    = 220
-  const PROXIMITY_COOLDOWN_MS = 3_000
-  const BROKER_THROTTLE_MS    = 250
+  //  - PROXIMITY_INIT_PX 170  (bumped from 120 — wider zone jitter +
+  //      always-on soft separation means pets land 50-150 px apart at
+  //      arrival, so the 120 threshold was too tight to ever fire)
+  //  - PROXIMITY_BREAK_PX 260 (matches spatial radius; loose enough to
+  //      keep a chat alive while pets get nudged by separation)
+  //  - PROXIMITY_COOLDOWN_MS 20s (same pair can't re-chat for 20s)
+  //  - BROKER_THROTTLE_MS 100ms
+  //  - MAX_CHAT_DURATION_MS 6s
+  //  - SPATIAL_CHAT_RADIUS 200 (was 260 — too restrictive when only one
+  //      chat per ~half the screen could fire; 200 still prevents piles
+  //      while letting multiple conversations happen across the map)
+  //  - MAX_FIRES_PER_TICK 2 (was 1 — pair with smaller spatial radius
+  //      so two distant chats can start in the same tick)
+  const PROXIMITY_INIT_PX      = 170
+  const PROXIMITY_BREAK_PX     = 260
+  const PROXIMITY_COOLDOWN_MS  = 20_000
+  const BROKER_THROTTLE_MS     = 100
+  const MAX_CHAT_DURATION_MS   = 12_000
+  const SPATIAL_CHAT_RADIUS    = 200
+
+  // chatStartedAt[petId] = ms timestamp when this pet entered its current
+  // chat. Used by the sweep to enforce MAX_CHAT_DURATION_MS so a fluent
+  // two-way chat can't keep refreshing inConversation forever.
+  const chatStartedAt = new Map<number, number>()
 
   const lastProximityChat = new Map<string, number>()
   let lastBrokerFire = 0
@@ -1031,7 +1380,11 @@ async function main() {
   // chat-outs from the previous pairing arrive at the gate AFTER activeChats
   // has been overwritten by a new pairing → "no-longer-paired" drops.
   const recentlyPaired = new Map<number, number>()  // petId -> unblockAtMs
-  const RE_PAIR_COOLDOWN_MS = 1_500
+  // 7s — long enough to let the pet walk 400+ px away from the chat spot
+  // (≈50 px/sec * 7s) so they don't immediately re-pair with someone who
+  // just arrived, but short enough that pets in a busy zone aren't all
+  // sitting in cooldown for half a minute.
+  const RE_PAIR_COOLDOWN_MS = 7_000
 
   function distanceBetween(a: number, b: number): number | null {
     const pa = positions.get(a)
@@ -1043,6 +1396,21 @@ async function main() {
   function endChat(a: number, b: number) {
     if (activeChats.get(a) === b) activeChats.delete(a)
     if (activeChats.get(b) === a) activeChats.delete(b)
+    // CRITICAL: also clear `inConversation`. Without this the pet stays
+    // frozen for the remaining CONVO_PAUSE_MS window after the chat ends,
+    // and ANY new pet that wanders nearby pairs with the still-frozen pet,
+    // triggering a fresh chat that refreshes inConversation again — the
+    // self-reinforcing cycle that builds permanent piles at hotspots.
+    inConversation.delete(a)
+    inConversation.delete(b)
+    // Forget when this chat started — used by the max-duration sweep.
+    chatStartedAt.delete(a)
+    chatStartedAt.delete(b)
+    // Force both pets to immediately walk AWAY from the chat spot. Picks
+    // the hotspot farthest from each pet's current position so they don't
+    // just pick the same nearby cluster again.
+    forceFarTarget(a)
+    forceFarTarget(b)
     // Mark both as recently paired — cooldown prevents an immediate re-pair
     // race that drops in-flight chat-outs from this just-ended chat.
     const unblockAt = Date.now() + RE_PAIR_COOLDOWN_MS
@@ -1051,6 +1419,23 @@ async function main() {
     // Tell both workers to abort any in-flight reply they were about to send
     supervisor.broadcast(a, { type: 'chat-end', withPetId: b })
     supervisor.broadcast(b, { type: 'chat-end', withPetId: a })
+  }
+
+  /// Force the pet to walk to a fresh zone with no loiter — used after a
+  /// chat ends so pets actively leave the chat location. Goes through
+  /// popNextZone so the zone reservation count stays accurate (otherwise
+  /// the pet would still be "reserved" at the zone it was previously
+  /// targeting, even though it's now headed somewhere else → false caps).
+  function forceFarTarget(petId: number) {
+    const pos = positions.get(petId)
+    if (!pos) return
+    const state = ensureWanderState(petId)
+    const zone  = popNextZone(state)
+    state.target = {
+      x: zone.x + (Math.random() - 0.5) * zone.jitter * 2,
+      y: zone.y + (Math.random() - 0.5) * zone.jitter * 2,
+    }
+    state.loiterUntil = Date.now() + 50
   }
 
   // Gate every chat-out IPC: if the speaker is no longer paired with the
@@ -1083,21 +1468,35 @@ async function main() {
     return true
   })
 
-  setInterval(() => {
+  /// Run the proximity sweep + chat-fire pass once. Called from a 100ms
+  /// scheduled tick AND opportunistically from the socket `move` handler
+  /// (push-based fire) so player-driven approaches start chats within
+  /// ~30ms instead of waiting up to 100ms for the next scheduled tick.
+  /// `pushed=true` skips the BROKER_THROTTLE_MS guard since push events
+  /// are inherently rate-limited by browser move emit cadence (~10Hz).
+  function runBrokerPass(pushed: boolean) {
     const now = Date.now()
 
-    // Sweep: if any active pair drifted past the break threshold, end it now
-    // so the next reply is skipped at the IPC layer.
+    // Sweep: end any chat that's drifted past the break threshold OR that's
+    // exceeded MAX_CHAT_DURATION_MS. Without the duration cap, a fluent
+    // back-and-forth would refresh inConversation forever and freeze the
+    // pets indefinitely → permanent pile at the chat location.
     for (const [petId, partner] of activeChats) {
       if (petId > partner) continue   // process each pair once
       const d = distanceBetween(petId, partner)
       if (d == null || d > PROXIMITY_BREAK_PX) {
         endChat(petId, partner)
         console.log(`[Broker] Chat swept pet ${petId}<->${partner} (drift)`)
+        continue
+      }
+      const startedAt = chatStartedAt.get(petId) ?? chatStartedAt.get(partner) ?? 0
+      if (startedAt > 0 && now - startedAt > MAX_CHAT_DURATION_MS) {
+        endChat(petId, partner)
+        console.log(`[Broker] Chat swept pet ${petId}<->${partner} (duration cap)`)
       }
     }
 
-    if (now - lastBrokerFire < BROKER_THROTTLE_MS) return
+    if (!pushed && now - lastBrokerFire < BROKER_THROTTLE_MS) return
 
     const pets = Array.from(positions.entries())
     // Build candidate pairs within PROXIMITY_INIT_PX that aren't on cooldown
@@ -1145,7 +1544,7 @@ async function main() {
       return c2Player - c1Player
     })
 
-    const MAX_FIRES_PER_TICK = 3
+    const MAX_FIRES_PER_TICK = 2
     lastBrokerFire = now
 
     // Track pets already paired in this tick. Without this, two candidate
@@ -1154,10 +1553,38 @@ async function main() {
     // the gate ("not paired anymore").
     const pairedThisTick = new Set<number>()
 
+    // Pre-compute midpoints of all currently active chats so we can enforce
+    // SPATIAL_CHAT_RADIUS — no two simultaneous chats within that distance.
+    // This is what stops 6+ pets from all freezing at central park: only
+    // ONE pair can chat per ~260 px region, the rest pass through.
+    const activeChatMidpoints: Array<{ x: number; y: number }> = []
+    for (const [petId, partnerId] of activeChats) {
+      if (petId > partnerId) continue   // each pair once
+      const pa = positions.get(petId)
+      const pb = positions.get(partnerId)
+      if (pa && pb) activeChatMidpoints.push({ x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2 })
+    }
+
     let firedCount = 0
     for (const [a, b, petA, petB] of candidates) {
       if (firedCount >= MAX_FIRES_PER_TICK) break
       if (pairedThisTick.has(a) || pairedThisTick.has(b)) continue
+      // Spatial chat limit: skip this pair if there's already an active
+      // chat within SPATIAL_CHAT_RADIUS of where this one would happen.
+      const posA = positions.get(a)
+      const posB = positions.get(b)
+      if (posA && posB) {
+        const midX = (posA.x + posB.x) / 2
+        const midY = (posA.y + posB.y) / 2
+        let blocked = false
+        for (const m of activeChatMidpoints) {
+          if (Math.hypot(m.x - midX, m.y - midY) < SPATIAL_CHAT_RADIUS) {
+            blocked = true
+            break
+          }
+        }
+        if (blocked) continue
+      }
 
       const pairKey = `${Math.min(a, b)}-${Math.max(a, b)}`
       lastProximityChat.set(pairKey, now)
@@ -1166,14 +1593,23 @@ async function main() {
       inConversation.set(b, now + CONVO_PAUSE_MS)
       activeChats.set(a, b)
       activeChats.set(b, a)
+      // Record the chat start time so the sweep can enforce the duration cap.
+      chatStartedAt.set(a, now)
+      chatStartedAt.set(b, now)
       pairedThisTick.add(a)
       pairedThisTick.add(b)
       supervisor.broadcast(a, { type: 'chat-request', withPetId: b, withPeerId: petB.peer_id, withName: petB.name })
       supervisor.broadcast(b, { type: 'chat-request', withPetId: a, withPeerId: petA.peer_id, withName: petA.name })
-      console.log(`[Broker] Fired chat-request: pet ${a} <-> pet ${b}`)
+      console.log(`[Broker] Fired chat-request: pet ${a} <-> pet ${b}${pushed ? ' (push)' : ''}`)
       firedCount++
     }
-  }, 250)   // tick fast so chat starts within ~250ms of pets coming close
+  }
+
+  // Scheduled tick — catches NPC↔NPC pairings (their positions update via the
+  // wander tick which doesn't fire socket events).
+  setInterval(() => runBrokerPass(false), 100)
+  // Expose to socket move handler for push-based player↔NPC fire.
+  pushBroker = () => runBrokerPass(true)
 
   await supervisor.start()
   bootstrapAdoptionChain().catch(err => console.error('[Hub] adoption-chain bootstrap failed:', err.message))

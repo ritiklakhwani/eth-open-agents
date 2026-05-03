@@ -253,8 +253,6 @@ export async function createConditionalMailbox(
     walletIntegrationId: args.walletIntegrationId,
   }, 'Deliver gift')
 
-  void window  // freshness window enforcement TBD once we confirm read returns a number
-
   const notifyHub = hubBaseUrl
     ? actionNode('webhook-1', 750, 'webhook', {
         url: `${hubBaseUrl}/api/keeperhub/mailbox/delivered`,

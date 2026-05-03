@@ -5,19 +5,24 @@
 // Hub-relay fallback: AXL's gVisor-namespace TCP routing isn't reachable on
 // hosts where gVisor inter-namespace forwarding isn't configured. When a
 // direct `axl.send` fails, the worker IPC-relays the message to the Hub,
-// which broadcasts it to the recipient worker via child-process IPC. The
-// architectural claim ("AXL is the wire") still holds where AXL routing
-// works; the Hub relay covers local-dev environments without sacrificing
-// pet-to-pet semantics.
+// which broadcasts it to the recipient worker via child-process IPC. Battle
+// messages are also mirrored through the relay because AXL can accept a local
+// send even when cross-namespace delivery never reaches the opponent.
 
 export class AXLClient {
   constructor(private apiPort: number) {}
 
   async send(toPeerId: string, msg: object): Promise<void> {
+    const shouldMirror = shouldMirrorThroughHub(msg)
+    const mirrored = shouldMirror ? relayThroughHub(toPeerId, msg) : false
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), shouldMirror ? 1_500 : 10_000)
+
     try {
       const r = await fetch(`http://127.0.0.1:${this.apiPort}/send`, {
         method: 'POST',
         headers: { 'X-Destination-Peer-Id': toPeerId },
+        signal: controller.signal,
         body: JSON.stringify(msg),
       })
       if (!r.ok) throw new Error(`AXL send failed: ${r.status} ${await r.text()}`)
@@ -25,11 +30,15 @@ export class AXLClient {
       // Fall back to Hub relay — IPC message to supervisor, which forwards
       // to the recipient worker. Only works when running under PetSupervisor
       // (i.e. process.send is defined).
-      if (typeof process.send === 'function') {
-        process.send({ type: 'relay-axl-msg', toPeerId, msg })
+      if (mirrored) {
+        return
+      }
+      if (relayThroughHub(toPeerId, msg)) {
         return
       }
       throw axlErr
+    } finally {
+      clearTimeout(timeout)
     }
   }
 
@@ -69,4 +78,15 @@ export class AXLClient {
     }
     throw new Error(`AXL node on port ${this.apiPort} did not become ready within ${maxWaitMs}ms`)
   }
+}
+
+function shouldMirrorThroughHub(msg: object): boolean {
+  const type = (msg as { type?: unknown }).type
+  return typeof type === 'string' && type.startsWith('battle-')
+}
+
+function relayThroughHub(toPeerId: string, msg: object): boolean {
+  if (typeof process.send !== 'function') return false
+  process.send({ type: 'relay-axl-msg', toPeerId, msg })
+  return true
 }

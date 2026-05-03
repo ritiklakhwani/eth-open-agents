@@ -53,10 +53,18 @@ export function PixelDialog({
       />
 
       {/* Card — warm cozy-night variant; matches the HUDs */}
-      <div className={`relative w-full ${sizeMap[size]}`}>
+      <div
+        className={[
+          `relative w-full ${sizeMap[size]}`,
+          'flex min-h-0 flex-col',
+          'max-h-[min(92dvh,52rem)]',
+        ].join(' ')}
+      >
         <PixelCard
           variant="warm"
           title={title}
+          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          bodyClassName="min-h-0 flex-1 overflow-y-auto overscroll-y-contain p-4"
           headerRight={
             !hideCloseButton && (
               <button

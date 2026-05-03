@@ -16,6 +16,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.9.0",
     "contracts-sdk": "workspace:*",
+    "deployer-tx-lock": "workspace:*",
     "dotenv": "^17.4.2",
     "ens": "workspace:*",
     "keeperhub": "workspace:*",

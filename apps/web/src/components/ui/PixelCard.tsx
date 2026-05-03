@@ -7,6 +7,8 @@ interface PixelCardProps extends Omit<HTMLAttributes<HTMLDivElement>, 'title'> {
   title?: ReactNode
   /** Extra content for the card header — e.g. icons, tags */
   headerRight?: ReactNode
+  /** Classes applied to the body wrapper (below the title bar). Default: `p-4` */
+  bodyClassName?: string
 }
 
 // Two style families:
@@ -56,6 +58,7 @@ export function PixelCard({
   variant = 'default',
   title,
   headerRight,
+  bodyClassName,
   className = '',
   children,
   ...rest
@@ -71,7 +74,7 @@ export function PixelCard({
           {headerRight}
         </div>
       )}
-      <div className="p-4">{children}</div>
+      <div className={bodyClassName ?? 'p-4'}>{children}</div>
     </div>
   )
 }

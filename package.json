@@ -8,7 +8,8 @@
     "build:web": "cd apps/web && pnpm build",
     "build:hub": "cd apps/hub && pnpm tsc --noEmit",
     "dev:web": "cd apps/web && pnpm dev",
-    "dev:hub": "cd apps/hub && pnpm tsx src/index.ts"
+    "dev:hub": "cd apps/hub && pnpm tsx src/index.ts",
+    "verify:battle-prereqs": "pnpm exec tsx scripts/verify-battle-escrow-prereqs.ts"
   },
   "keywords": [],
   "author": "",

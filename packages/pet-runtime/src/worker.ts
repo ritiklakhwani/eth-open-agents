@@ -86,6 +86,30 @@ async function main() {
   // Hub-driven proximity gate: cleared by `chat-end` when pets drift apart so
   // the next queued reply (mid 1.5-3s pacing) skips its send.
   const activeChatPartner: { id: number | null } = { id: null }
+  const seenBattleMessages = new Set<string>()
+
+  function shouldSkipDuplicateBattleMessage(fromPeerId: string, msg: Record<string, unknown>): boolean {
+    const type = typeof msg.type === 'string' ? msg.type : ''
+    const battleId = typeof msg.battleId === 'string' ? msg.battleId : ''
+    if (!type.startsWith('battle-') || !battleId) return false
+
+    const key = [
+      fromPeerId,
+      type,
+      battleId,
+      msg.round ?? '',
+      msg.fromPetId ?? '',
+      msg.vote ?? '',
+    ].join(':')
+    if (seenBattleMessages.has(key)) return true
+
+    seenBattleMessages.add(key)
+    if (seenBattleMessages.size > 500) {
+      const oldest = seenBattleMessages.values().next().value
+      if (oldest) seenBattleMessages.delete(oldest)
+    }
+    return false
+  }
 
   // Natural pacing window (ms) — kept TIGHT so chats feel like real volleys.
   // Was 700-1700; with MAX_CHAT_DURATION_MS bumped to 12s, this lets ~16
@@ -249,13 +273,22 @@ async function main() {
         withWallet:  m.withWallet  as `0x${string}`,
         stakeAmount: m.stakeAmount as string,
         judges:      m.judges      as Array<{ petId: number; peerId: string }>,
+        format:      m.format      as string | undefined,
+        onProgress:  (event) => {
+          process.send?.({
+            type: 'battle-progress',
+            petId: PET_ID,
+            battleId: m.battleId,
+            ...event,
+          })
+        },
       })
       .then(result => {
         process.send?.({ type: 'battle-result', petId: PET_ID, battleId: m.battleId, ...result })
       })
       .catch((err: Error) => {
         console.error(`[Pet ${PET_ID}] battle error:`, err.message)
-        process.send?.({ type: 'battle-result', petId: PET_ID, battleId: m.battleId, winner: -1, text: err.message })
+        process.send?.({ type: 'battle-result', petId: PET_ID, battleId: m.battleId, winner: -1, text: err.message, judges: [], pot: '0', payouts: [] })
       })
 
     } else if (m.type === 'relayed-axl-msg') {
@@ -275,6 +308,12 @@ async function main() {
 
   // Single dispatcher used by AXL recv loop AND Hub-relay fallback.
   async function dispatchPeerMessage(fromPeerId: string, msg: Record<string, unknown>) {
+    if (shouldSkipDuplicateBattleMessage(fromPeerId, msg)) return
+
+    if (typeof msg.type === 'string' && msg.type.startsWith('battle-')) {
+      console.log(`[Pet ${PET_ID}] battle recv ${msg.type} ${msg.battleId ?? ''} from ${fromPeerId.slice(0, 8)}`)
+    }
+
     if (msg.type === 'chat') {
       const text     = msg.text as string
       const fromId   = msg.fromPetId as number
@@ -368,6 +407,7 @@ async function main() {
       handleBattleJudge(
         axl, brain, fromPeerId,
         msg as { battleId: string; transcript: unknown[]; pet1Id: number; pet2Id: number },
+        PET_ID,
       ).catch((err: Error) => console.error(`[Pet ${PET_ID}] battle-judge error:`, err.message))
 
     } else if (msg.type === 'battle-accept' || msg.type === 'battle-vote') {

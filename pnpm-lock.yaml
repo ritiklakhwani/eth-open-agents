@@ -26,6 +26,9 @@ importers:
       contracts-sdk:
         specifier: workspace:*
         version: link:../../packages/contracts-sdk
+      deployer-tx-lock:
+        specifier: workspace:*
+        version: link:../../packages/deployer-tx-lock
       dotenv:
         specifier: ^17.4.2
         version: 17.4.2
@@ -146,6 +149,8 @@ importers:
         specifier: ^2.48.4
         version: 2.48.4(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@5.0.10)(zod@4.3.6)
 
+  packages/deployer-tx-lock: {}
+
   packages/ens:
     dependencies:
       viem:
@@ -191,6 +196,9 @@ importers:
       contracts-sdk:
         specifier: workspace:*
         version: link:../contracts-sdk
+      deployer-tx-lock:
+        specifier: workspace:*
+        version: link:../deployer-tx-lock
       dotenv:
         specifier: ^17.4.2
         version: 17.4.2

@@ -134,6 +134,139 @@ h1, h2, h3, h4, h5, h6 {
 .animate-shake   { animation: pixel-shake 0.4s steps(5); }
 .animate-coin    { animation: coin-glint 0.3s steps(2) infinite; }
 
+/* ── Landing page animations ────────────────────────────────────────────
+   Subtle, CSS-only — no JS frame churn on first paint.
+   ────────────────────────────────────────────────────────────────────── */
+
+/* Pet parade — one full pass of the screen left to right */
+@keyframes pet-parade {
+  0%   { transform: translateX(-15vw); }
+  100% { transform: translateX(115vw); }
+}
+
+/* Pet idle bob — used both on parading pets and standing pets */
+@keyframes pet-bob {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-3px); }
+}
+
+/* Twinkling stars/sparkles in the night sky */
+@keyframes star-twinkle {
+  0%, 100% { opacity: 0.2; }
+  50%      { opacity: 1; }
+}
+
+/* Slow drift for hero parallax clouds */
+@keyframes cloud-drift {
+  0%   { transform: translateX(-10vw); }
+  100% { transform: translateX(110vw); }
+}
+
+/* Section reveal as the user scrolls down — soft slide-in */
+@keyframes section-reveal {
+  0%   { opacity: 0; transform: translateY(16px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.animate-parade   { animation: pet-parade 36s linear infinite; }
+.animate-pet-bob  { animation: pet-bob 0.6s steps(2) infinite; }
+.animate-twinkle  { animation: star-twinkle 2.4s ease-in-out infinite; }
+.animate-cloud    { animation: cloud-drift 90s linear infinite; }
+.animate-reveal   { animation: section-reveal 600ms ease-out both; }
+
+/* ── Window minimize / maximize (chunky retro game feel) ────────────────
+   stepped() timing gives the discrete "frames" look you'd see in a NES
+   menu animation. transform-origin set per-element so the panel grows OUT
+   of the corner it's anchored to. */
+
+/* Panel slamming open from the bottom-right corner — used when GlobalChat
+   expands from its corner-pinned orb. */
+@keyframes panel-pop-bottom-right {
+  0%   { transform: scale(0.55); opacity: 0; }
+  50%  { transform: scale(1.06); opacity: 1; }
+  100% { transform: scale(1);    opacity: 1; }
+}
+
+/* Panel slamming open from the top-right corner — used when PetInspector
+   expands from a collapsed header (pinned top-right of /world). */
+@keyframes panel-pop-top-right {
+  0%   { transform: scale(0.55); opacity: 0; }
+  50%  { transform: scale(1.06); opacity: 1; }
+  100% { transform: scale(1);    opacity: 1; }
+}
+
+/* Body roll-down — used when an inspector's body panel un-collapses
+   beneath its header. Origin top so it rolls open like a window shade. */
+@keyframes body-roll-down {
+  0%   { transform: scaleY(0); opacity: 0; }
+  100% { transform: scaleY(1); opacity: 1; }
+}
+
+/* Small bounce-in for the corner orb — gives the minimize action a satisfying
+   "thud" instead of just appearing. */
+@keyframes orb-thud {
+  0%   { transform: scale(0.7); opacity: 0; }
+  60%  { transform: scale(1.08); opacity: 1; }
+  100% { transform: scale(1);    opacity: 1; }
+}
+
+.animate-panel-pop-br {
+  animation: panel-pop-bottom-right 220ms steps(4, end) both;
+  transform-origin: bottom right;
+}
+
+.animate-panel-pop-tr {
+  animation: panel-pop-top-right 220ms steps(4, end) both;
+  transform-origin: top right;
+}
+
+.animate-body-roll {
+  animation: body-roll-down 180ms steps(3, end) both;
+  transform-origin: top center;
+}
+
+.animate-orb-thud {
+  animation: orb-thud 240ms steps(4, end) both;
+  transform-origin: bottom right;
+}
+
+/* Big white-outlined pixel headline (Pumpville signature look).
+   Uses text-shadow rather than -webkit-text-stroke for better Press Start 2P
+   rendering — the stroke would smear the bitmap glyphs. */
+.text-stroke-navy {
+  color: #ffffff;
+  text-shadow:
+    -3px -3px 0 var(--color-bg-deep),
+     3px -3px 0 var(--color-bg-deep),
+    -3px  3px 0 var(--color-bg-deep),
+     3px  3px 0 var(--color-bg-deep),
+     0    3px 0 var(--color-bg-deep),
+     0   -3px 0 var(--color-bg-deep),
+     3px  0   0 var(--color-bg-deep),
+    -3px  0   0 var(--color-bg-deep),
+     6px  6px 0 rgba(10, 12, 46, 0.6);
+}
+
+.text-stroke-navy-sm {
+  color: #ffffff;
+  text-shadow:
+    -2px -2px 0 var(--color-bg-deep),
+     2px -2px 0 var(--color-bg-deep),
+    -2px  2px 0 var(--color-bg-deep),
+     2px  2px 0 var(--color-bg-deep),
+     0    2px 0 var(--color-bg-deep),
+     0   -2px 0 var(--color-bg-deep),
+     2px  0   0 var(--color-bg-deep),
+    -2px  0   0 var(--color-bg-deep);
+}
+
+/* Pixel-perfect upscale for sprites + tiles */
+.pixelated {
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+}
+
 /* ── Pixel-perfect borders helper ──────────────────────────────────────── */
 .pixel-border {
   border: 4px solid var(--color-border);

@@ -3,6 +3,7 @@ import { Press_Start_2P, VT323 } from "next/font/google"
 import "./globals.css"
 import { CRTOverlay } from "@/components/CRTOverlay"
 import { Web3Providers } from "@/components/Web3Providers"
+import { BgMusic } from "@/components/BgMusic"
 
 const pressStart2P = Press_Start_2P({
   variable: "--font-pixel",
@@ -35,6 +36,7 @@ export default function RootLayout({
         <Web3Providers>
           {children}
           <CRTOverlay />
+          <BgMusic />
         </Web3Providers>
       </body>
     </html>

@@ -7,11 +7,14 @@ import { TamaPetABI, ADDRESSES_SEPOLIA } from 'contracts-sdk'
 import type { Server as SocketIOServer } from 'socket.io'
 import type { DB } from './db'
 import { generatePetAxlConfig } from './axl-config'
+import { withDeployerTxLock } from 'deployer-tx-lock'
 
 // ESM doesn't expose __dirname; derive from import.meta.url so child-process
 // fork paths resolve correctly when the hub runs via tsx in module mode.
 const __filename = fileURLToPath(import.meta.url)
 const __dirname  = path.dirname(__filename)
+/** Monorepo root — same path pet-runtime workers use as `process.cwd()`. */
+const MONOREPO_ROOT = path.resolve(__dirname, '..', '..', '..')
 
 // Shape of the Mint event args as emitted by TamaPet.sol
 interface MintEventArgs {
@@ -34,6 +37,14 @@ interface MintArgs {
   wallet:    `0x${string}`
 }
 
+const ENS_HEARTBEAT_INTERVAL_MS = Number(process.env.ENS_HEARTBEAT_INTERVAL_MS ?? 60_000)
+
+type BattleEventMetadata = Record<string, unknown>
+
+interface BattlePairRow {
+  pet_a: number
+  pet_b: number
+}
 export class PetSupervisor {
   private workers = new Map<number, ChildProcess>()
   private io?: SocketIOServer
@@ -55,6 +66,45 @@ export class PetSupervisor {
     this.chatGate = gate
   }
 
+  hasWorker(tokenId: number): boolean {
+    return this.workers.has(tokenId)
+  }
+
+  recordBattleEvent(
+    battleId: string,
+    phase: string,
+    detail: string,
+    petId?: number,
+    metadata: BattleEventMetadata = {},
+  ) {
+    const createdAt = Date.now()
+    this.db.prepare(
+      'INSERT INTO battle_events (battle_id, phase, detail, pet_id, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run(
+      battleId,
+      phase,
+      detail,
+      petId ?? null,
+      JSON.stringify(metadata),
+      createdAt,
+    )
+
+    const battle = this.db.prepare('SELECT pet_a, pet_b FROM battles WHERE id = ?')
+      .get(battleId) as BattlePairRow | undefined
+    const recipients = battle ? [battle.pet_a, battle.pet_b] : (petId ? [petId] : [])
+    for (const recipientPetId of recipients) {
+      this.io?.to('world').emit('activity', {
+        type: 'battle-progress',
+        petId: recipientPetId,
+        battleId,
+        phase,
+        detail,
+        eventPetId: petId ?? null,
+        metadata,
+        timestamp: createdAt,
+      })
+    }
+  }
   async start() {
     await this.respawnExisting()
     console.log(`[Supervisor] Watching ${ADDRESSES_SEPOLIA.TamaPet} for Mint events`)
@@ -93,23 +143,24 @@ export class PetSupervisor {
     // Generate AXL config + ed25519 key before the worker tries to read it (idempotent)
     generatePetAxlConfig(tokenId)
 
+    // Spawn inside the park rect (world.tmj zone: x:500-900, y:460-768)
+    const spawnX = 520 + Math.random() * 360
+    const spawnY = 480 + Math.random() * 270
     this.db.prepare(`
-      INSERT OR IGNORE INTO pets (token_id, name, owner_address, wallet_address, blob_cid, archetype, ens_name, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(tokenId, name, owner, wallet, blobCID, archetype, `${name}.tama.eth`, Date.now())
+      INSERT OR IGNORE INTO pets (token_id, name, owner_address, wallet_address, blob_cid, archetype, ens_name, pos_x, pos_y, zone, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(tokenId, name, owner, wallet, blobCID, archetype, `${name}.tama.eth`, spawnX, spawnY, 'park', Date.now())
 
     this.scheduleAllowanceWorkflow(tokenId, wallet)
       .catch(err => console.error(`[Pet ${tokenId}] allowance workflow error:`, err.message))
 
-    // Repo root sits 3 levels above this file: apps/hub/src/PetSupervisor.ts
-    const repoRoot   = path.resolve(__dirname, '..', '..', '..')
-    const workerPath = path.join(repoRoot, 'packages', 'pet-runtime', 'src', 'worker.ts')
+    const workerPath = path.join(MONOREPO_ROOT, 'packages', 'pet-runtime', 'src', 'worker.ts')
 
     const worker = fork(workerPath, [], {
       // Pin child's cwd to the repo root. The worker resolves the AXL binary +
       // axl-config files relative to process.cwd(), which would otherwise
       // inherit the hub's cwd (apps/hub) and miss the binary at <repo>/bin/axl-node.
-      cwd: repoRoot,
+      cwd: MONOREPO_ROOT,
       env: {
         ...process.env,
         PET_ID:    String(tokenId),
@@ -135,12 +186,14 @@ export class PetSupervisor {
         // Fire-and-forget — pet shouldn't block on ENS confirms.
         this.mintEnsSubnameForPet(m.petId as number)
           .catch(err => console.warn(`[Pet ${m.petId}] ENS mint skipped:`, err.message))
+        this.bumpLastSeenForPetId(m.petId as number)
+          .catch(err => console.warn(`[Pet ${m.petId}] ENS online heartbeat skipped:`, err.message))
 
       } else if (m.type === 'chat-out') {
         const fromId = m.petId   as number
         const toId   = m.toPetId as number
         if (this.chatGate && !this.chatGate(fromId, toId)) {
-          console.log(`[Chat] Pet ${fromId} -> Pet ${toId} dropped (out of proximity)`)
+          // Specific reason logged inside the gate (no-longer-paired / drift / no-position).
           return
         }
         const text = String(m.text ?? '').slice(0, 80)
@@ -153,6 +206,8 @@ export class PetSupervisor {
         this.db.prepare(
           'INSERT OR IGNORE INTO keeperhub_workflows (id, pet_id, kind, status, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)'
         ).run(m.workflowId, m.petId, 'mailbox', 'active', JSON.stringify(m), Date.now())
+        this.bumpLastSeenForPetId(Number(m.toPetId))
+          .catch(err => console.warn(`[Mailbox] recipient heartbeat skipped:`, err.message))
         this.io?.to('world').emit('activity', {
           type: 'mailbox-queued', petId: m.petId, toPetId: m.toPetId, workflowId: m.workflowId, timestamp: Date.now(),
         })
@@ -170,10 +225,75 @@ export class PetSupervisor {
           type: 'subscription-created', petId: m.petId, workflowId: m.workflowId, subscriptionId: m.subscriptionId, timestamp: Date.now(),
         })
 
+      } else if (m.type === 'battle-progress') {
+        this.recordBattleEvent(
+          String(m.battleId),
+          String(m.phase ?? 'progress'),
+          String(m.detail ?? ''),
+          m.petId as number | undefined,
+          (m.metadata ?? {}) as BattleEventMetadata,
+        )
+
       } else if (m.type === 'battle-result') {
-        this.io?.to('world').emit('activity', {
-          type: 'battle-result', petId: m.petId, battleId: m.battleId, winner: m.winner, text: m.text, timestamp: Date.now(),
-        })
+        const winner = Number(m.winner)
+        const onChain = String(m.onChainStatus ?? 'unknown')
+        // `settled` = verdict + BattleEscrow settle tx submitted.
+        // `judged` = verdict on record but escrow did not complete (timeout / revert / etc.).
+        // `error` = no normal winner (e.g. worker failure).
+        const battleStatus =
+          onChain === 'settle-submitted'
+            ? 'settled'
+            : winner > 0
+              ? 'judged'
+              : 'error'
+
+        this.db.prepare(
+          `UPDATE battles SET status = ?, winner = ?, judges = ?, payouts = ?, settled_at = ?
+           WHERE id = ?`,
+        ).run(
+          battleStatus,
+          m.winner,
+          JSON.stringify(m.judges ?? []),
+          JSON.stringify(m.payouts ?? []),
+          Date.now(),
+          m.battleId,
+        )
+        const payouts = (m.payouts ?? []) as Array<{ betterPetId: number; amount: string }>
+        this.recordBattleEvent(
+          String(m.battleId),
+          (m.winner as number) > 0 ? 'verdict' : 'error',
+          String(m.text ?? 'Battle finished'),
+          m.petId as number | undefined,
+          {
+            winner: m.winner,
+            judges: m.judges ?? [],
+            pot: m.pot ?? '0',
+            payouts,
+            createTxHash: m.createTxHash ?? null,
+            settlementTxHash: m.settlementTxHash ?? null,
+            onChainStatus: m.onChainStatus ?? 'unknown',
+            settlementError: m.settlementError ?? null,
+          },
+        )
+        const battle = this.db.prepare('SELECT pet_a, pet_b FROM battles WHERE id = ?')
+          .get(m.battleId) as BattlePairRow | undefined
+        for (const recipientPetId of battle ? [battle.pet_a, battle.pet_b] : [m.petId as number]) {
+          this.io?.to('world').emit('activity', {
+            type:     'battle-result',
+            petId:    recipientPetId,
+            battleId: m.battleId,
+            winner:   m.winner,
+            judges:   m.judges  ?? [],
+            pot:      m.pot     ?? '0',
+            payouts,
+            text:     m.text,
+            createTxHash: m.createTxHash ?? null,
+            settlementTxHash: m.settlementTxHash ?? null,
+            onChainStatus: m.onChainStatus ?? null,
+            settlementError: m.settlementError ?? null,
+            timestamp: Date.now(),
+          })
+        }
         // A3: write battle belt to winner ENS
         const winnerId = m.winner as number
         if (winnerId && winnerId > 0) {
@@ -203,20 +323,31 @@ export class PetSupervisor {
       } else if (m.type === 'relay-axl-msg') {
         // Hub-as-AXL-relay fallback: when worker's direct axl.send fails (gVisor
         // routing unreachable), it IPC-asks Hub to forward. We resolve the
-        // recipient's tokenId by peer_id from the DB and broadcast to that
+        // recipient's tokenId from the payload or peer_id and broadcast to that
         // worker via existing child_process.fork channel. End result: the
         // recipient worker sees the message in its handleIncoming path,
         // identical to receiving it via real AXL recv.
         const toPeerId = m.toPeerId as string
-        const row = this.db.prepare(
-          'SELECT token_id FROM pets WHERE peer_id = ? LIMIT 1'
-        ).get(toPeerId) as { token_id: number } | undefined
-        if (row) {
-          this.broadcast(row.token_id, {
+        const payload = (m.msg ?? {}) as Record<string, unknown>
+        const directPetId = typeof payload.toPetId === 'number' && Number.isFinite(payload.toPetId)
+          ? payload.toPetId
+          : undefined
+        const row = directPetId === undefined
+          ? this.db.prepare('SELECT token_id FROM pets WHERE peer_id = ? LIMIT 1')
+            .get(toPeerId) as { token_id: number } | undefined
+          : undefined
+        const toPetId = directPetId ?? row?.token_id
+        if (toPetId !== undefined && this.workers.has(toPetId)) {
+          this.broadcast(toPetId, {
             type: 'relayed-axl-msg',
             fromPeerId: this.peerIdFor(tokenId),
-            payload: m.msg,
+            payload,
           })
+          if (typeof payload.type === 'string' && payload.type.startsWith('battle-')) {
+            console.log(`[AXL relay] ${payload.type} ${payload.battleId ?? ''}: pet ${tokenId} -> pet ${toPetId}`)
+          }
+        } else {
+          console.warn(`[AXL relay] target unavailable for peer ${toPeerId} / pet ${directPetId ?? 'unknown'}`)
         }
 
       } else {
@@ -227,6 +358,7 @@ export class PetSupervisor {
     worker.on('exit', (code) => {
       console.log(`[Pet ${tokenId}] exited (code ${code})`)
       this.workers.delete(tokenId)
+      this.db.prepare('UPDATE pets SET peer_id = NULL WHERE token_id = ?').run(tokenId)
     })
 
     this.workers.set(tokenId, worker)
@@ -340,35 +472,39 @@ export class PetSupervisor {
       const existing = await ens.readPetAddrFromENS(lookupName, rpcUrl)
       if (existing && existing.toLowerCase() === row.wallet_address.toLowerCase()) {
         console.log(`[Pet ${petId}] ENS subname ${expectedFullName} already minted — skipping`)
-        await ens.heartbeatLastSeen(row.name, rpcUrl, signerKey).catch(() => {})
+        await withDeployerTxLock(MONOREPO_ROOT, () => ens.heartbeatLastSeen(row.name, rpcUrl, signerKey)).catch(
+          () => {},
+        )
         return
       }
     } catch {
       // not minted yet — proceed
     }
 
-    const result = await ens.mintPetSubname({
-      petName:          row.name,
-      parentName,                                              // ← nested if breeding
-      petWalletAddress: row.wallet_address as `0x${string}`,
-      peerId:           row.peer_id,
-      blobCID:          row.blob_cid ?? '',
-      rpcUrl,
-      signerKey,
-    })
+    const result = await withDeployerTxLock(MONOREPO_ROOT, () =>
+      ens.mintPetSubname({
+        petName:          row.name,
+        parentName,                                              // ← nested if breeding
+        petWalletAddress: row.wallet_address as `0x${string}`,
+        peerId:           row.peer_id,
+        blobCID:          row.blob_cid ?? '',
+        rpcUrl,
+        signerKey,
+      }),
+    )
     console.log(
       `[Pet ${petId}] ENS minted: ${result.fullName} — subname tx ${result.subnameTxHash.slice(0, 10)}…`
     )
 
     // Bump lastSeenBlock right after mint so the KeeperHub mailbox HERO
     // workflow can fire if anyone has a pending gift to this pet.
-    await ens.heartbeatLastSeen(row.name, rpcUrl, signerKey).catch(() => {})
+    await withDeployerTxLock(MONOREPO_ROOT, () => ens.heartbeatLastSeen(row.name, rpcUrl, signerKey)).catch(() => {})
   }
 
   // ── A3: ENS heartbeat tick — bump lastSeenBlock for all alive pets every
-  // 10 minutes. The KeeperHub conditional mailbox workflow polls this record;
-  // updating it makes the conditional fire organically when a recipient is
-  // "online enough" instead of needing manual Trigger-Now button.
+  // minute by default. The KeeperHub conditional mailbox workflow polls this
+  // record; updating it makes the conditional fire organically when a
+  // recipient is "online enough" instead of needing manual Trigger-Now button.
   startEnsHeartbeat() {
     const rpcUrl    = process.env.SEPOLIA_RPC_URL
     const signerKey = process.env.DEPLOYER_PRIVATE_KEY as `0x${string}` | undefined
@@ -382,7 +518,7 @@ export class PetSupervisor {
       // Stagger writes to avoid flooding the RPC
       for (const { name } of pets) {
         try {
-          await ens.heartbeatLastSeen(name, rpcUrl, signerKey)
+          await withDeployerTxLock(MONOREPO_ROOT, () => ens.heartbeatLastSeen(name, rpcUrl, signerKey))
           await new Promise((r) => setTimeout(r, 1500))
         } catch (err) {
           // Silent — ENS heartbeat is best-effort, don't spam logs
@@ -392,9 +528,10 @@ export class PetSupervisor {
       console.log(`[ENS] Heartbeat sent for ${pets.length} pet(s)`)
     }
 
-    // Initial bump 30s after boot, then every 10 min
-    setTimeout(() => { void tick() }, 30_000)
-    setInterval(tick, 10 * 60_000)
+    // Initial bump shortly after boot, then keep it fresh for KeeperHub's
+    // one-minute schedule trigger.
+    setTimeout(() => { void tick() }, 10_000)
+    setInterval(tick, ENS_HEARTBEAT_INTERVAL_MS)
   }
 
   // ── A3 helper: bump a single pet's lastSeenBlock now (used after battle
@@ -405,10 +542,18 @@ export class PetSupervisor {
     if (!rpcUrl || !signerKey) return
     try {
       const ens = await import('ens')
-      await ens.heartbeatLastSeen(petName, rpcUrl, signerKey)
+      await withDeployerTxLock(MONOREPO_ROOT, () => ens.heartbeatLastSeen(petName, rpcUrl, signerKey))
     } catch (err) {
       console.warn(`[ENS] bumpLastSeen(${petName}) failed: ${(err as Error).message}`)
     }
+  }
+
+  async bumpLastSeenForPetId(petId: number) {
+    if (!Number.isFinite(petId) || !this.workers.has(petId)) return
+    const row = this.db.prepare('SELECT name FROM pets WHERE token_id = ? AND peer_id IS NOT NULL AND peer_id != ?')
+      .get(petId, '') as { name: string } | undefined
+    if (!row?.name) return
+    await this.bumpLastSeen(row.name)
   }
 
   // ── ENS Most Creative: friendship attestation ──────────────────────────────
@@ -423,7 +568,9 @@ export class PetSupervisor {
     try {
       const ens = await import('ens')
       const claim = `Friend since strength ${strength}. Vouched by ${fromName}.`
-      await ens.issueAttestation(fromName, toName, claim, rpcUrl, signerKey)
+      await withDeployerTxLock(MONOREPO_ROOT, () =>
+        ens.issueAttestation(fromName, toName, claim, rpcUrl, signerKey),
+      )
       console.log(`[ENS] Attestation: ${fromName} → ${toName}.tama.eth (strength ${strength})`)
     } catch (err) {
       console.warn(`[ENS] issueAttestation failed: ${(err as Error).message}`)
@@ -440,7 +587,9 @@ export class PetSupervisor {
       const key = `tama.belts.${format}`
       const current = await ens.readTextRecord(winnerName, key, rpcUrl).catch(() => '0')
       const next    = (parseInt(current || '0', 10) + 1).toString()
-      await ens.setTextRecord(winnerName, key, next, rpcUrl, signerKey)
+      await withDeployerTxLock(MONOREPO_ROOT, () =>
+        ens.setTextRecord(winnerName, key, next, rpcUrl, signerKey),
+      )
       console.log(`[ENS] ${winnerName}.tama.eth ${key} → ${next}`)
     } catch (err) {
       console.warn(`[ENS] incrementBeltCount failed: ${(err as Error).message}`)

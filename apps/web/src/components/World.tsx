@@ -11,8 +11,9 @@ import { PetInspector } from './PetInspector'
  */
 export interface SceneEventEmitter {
   events: {
-    on:  (event: string, fn: (...args: unknown[]) => void) => void
-    off: (event: string, fn: (...args: unknown[]) => void) => void
+    on:   (event: string, fn: (...args: unknown[]) => void) => void
+    off:  (event: string, fn: (...args: unknown[]) => void) => void
+    emit: (event: string, ...args: unknown[]) => void
   }
 }
 
@@ -20,6 +21,8 @@ interface WorldProps {
   petId: number
   /** WebSocket server URL — defaults to localhost for dev */
   socketServerUrl?: string
+  /** When true, keyboard input is disabled and modals are suppressed */
+  spectator?: boolean
   /** Callback when player enters a zone (for opening modals etc.) */
   onZoneEntered?: (zone: Zone) => void
   /** Callback when user clicks the BREED button on the pet inspector */
@@ -39,7 +42,7 @@ interface WorldProps {
  *
  * Phaser is dynamically imported because it touches `window` and breaks SSR.
  */
-export function World({ petId, socketServerUrl, onZoneEntered, onBreed, onSceneReady }: WorldProps) {
+export function World({ petId, socketServerUrl, spectator, onZoneEntered, onBreed, onSceneReady }: WorldProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const gameRef = useRef<unknown>(null) // Phaser.Game; typed loosely to avoid SSR import
   const [zone, setZone] = useState<Zone>('park')
@@ -91,7 +94,7 @@ export function World({ petId, socketServerUrl, onZoneEntered, onBreed, onSceneR
       gameRef.current = game
 
       // Register + auto-start the scene WITH init data
-      game.scene.add('WorldScene', WorldScene, true, { petId, socketServerUrl })
+      game.scene.add('WorldScene', WorldScene, true, { petId, socketServerUrl, spectator })
 
       // Listen for zone-change events from the scene (after a tick to ensure it's running)
       setTimeout(() => {
@@ -119,19 +122,19 @@ export function World({ petId, socketServerUrl, onZoneEntered, onBreed, onSceneR
       canceled = true
       cleanup?.()
     }
-  }, [petId, socketServerUrl])
+  }, [petId, socketServerUrl, spectator])
 
   return (
     <div className="relative w-full h-screen overflow-hidden">
       <div ref={containerRef} className="absolute inset-0" />
 
-      {/* Top-left HUD: current zone + controls hint */}
+      {/* Top-left HUD: current zone — minimal warm pill matching the map */}
       <div className="pointer-events-none absolute top-4 left-4 z-10">
-        <div className="border-4 border-[color:var(--color-pink)] bg-[color:var(--color-bg-mid)] px-4 py-2 shadow-[4px_4px_0_0_var(--color-bg-deep)]">
-          <p className="font-[family-name:var(--font-pixel)] text-[10px] uppercase tracking-widest text-[color:var(--color-ink-mid)]">
+        <div className="border border-[color:var(--color-yellow)]/40 bg-[rgba(10,12,46,0.7)] backdrop-blur-sm px-3 py-1.5">
+          <p className="font-[family-name:var(--font-pixel)] text-[9px] uppercase tracking-widest text-[color:var(--color-ink-low)]">
             Zone
           </p>
-          <p className="font-[family-name:var(--font-pixel)] text-sm text-[color:var(--color-pink)]">
+          <p className="font-[family-name:var(--font-pixel)] text-xs tracking-wider text-[color:var(--color-yellow)]">
             {zone.toUpperCase()}
           </p>
         </div>

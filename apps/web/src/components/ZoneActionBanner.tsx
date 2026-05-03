@@ -48,6 +48,8 @@ interface ZoneActionBannerProps {
   onOpenBreeding: () => void
   /** Open the SubscriptionPanel modal (mounted by the page). */
   onOpenOffice: () => void
+  /** Open the IntegrationModal for a specific partner. */
+  onOpenIntegration: (partner: PartnerKey) => void
 }
 
 /// Zone names that hide the banner — no contextual action available.
@@ -65,6 +67,7 @@ export function ZoneActionBanner({
   onOpenMailbox,
   onOpenBreeding,
   onOpenOffice,
+  onOpenIntegration,
 }: ZoneActionBannerProps) {
   const [action, setAction] = useState<BannerAction | null>(null)
 
@@ -120,13 +123,13 @@ export function ZoneActionBanner({
     function handlePartnerEnter(...args: unknown[]) {
       const payload = args[0] as PartnerEnterPayload | undefined
       if (!payload) return
-      const partner = payload.partner
+      const partner = payload.partner as PartnerKey
       const label   = payload.label || partner
       setAction({
         key:         `partner-${partner}`,
         title:       label.toUpperCase(),
         buttonLabel: 'RUN INTEGRATION CHECK',
-        onClick:     () => alert(`healthcheck for ${partner}: stub`),
+        onClick:     () => onOpenIntegration(partner),
       })
     }
 
@@ -139,7 +142,7 @@ export function ZoneActionBanner({
       scene.events.off('zone-changed',  handleZoneChanged)
       scene.events.off('partner-enter', handlePartnerEnter)
     }
-  }, [scene, onOpenMailbox, onOpenBreeding, onOpenOffice])
+  }, [scene, onOpenMailbox, onOpenBreeding, onOpenOffice, onOpenIntegration])
 
   // Render container is always mounted so the fade transition can animate
   // both directions. Visibility is driven by the `visible` flag on the

@@ -98,33 +98,90 @@ export function GlobalChat() {
     [users],
   )
 
+  // ── Collapsed: render as a square chat panel pinned to the corner ─────
+  // Square with NO offset from the bottom-right edges, so it fully eclipses
+  // the Gemini watermark baked into world-bg.png — no PNG edit needed and
+  // looks like an intentional UI affordance rather than a mask. The shape
+  // is anchored corner-flush; only the top-left edges are visible so we
+  // give those a 4px yellow border for the hard pixel-frame look.
+  if (collapsed) {
+    return (
+      <button
+        type="button"
+        onClick={() => setCollapsed(false)}
+        aria-label={`Open global chat (${onlineCount} online)`}
+        className="fixed bottom-0 right-0 z-30 h-[120px] w-[140px] border border-[color:var(--color-yellow)]/35 bg-[color:var(--color-bg-deep)] hover:border-[color:var(--color-yellow)]/60 transition-all flex flex-col items-center justify-center gap-1.5 cursor-pointer group animate-orb-thud"
+      >
+        {/* Two overlapping speech-bubbles glyph — inline SVG so we can
+            theme it with currentColor and scale crisply. Mirrors the user-
+            supplied reference: outlined back bubble, filled front bubble. */}
+        <svg
+          viewBox="0 0 64 56"
+          width={56}
+          height={48}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={4}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          className="text-[color:var(--color-yellow)] group-hover:scale-110 transition-transform"
+          aria-hidden="true"
+        >
+          {/* Back bubble: outline only */}
+          <path d="M4 4 h32 a4 4 0 0 1 4 4 v18 a4 4 0 0 1 -4 4 h-22 l-6 8 v-8 h-4 a4 4 0 0 1 -4 -4 v-18 a4 4 0 0 1 4 -4 z" />
+          {/* Front bubble: filled with bg color so it sits ON TOP of the
+              back bubble cleanly — overlap is the whole point of the icon */}
+          <path
+            d="M28 22 h32 a4 4 0 0 1 4 4 v18 a4 4 0 0 1 -4 4 h-12 l-6 8 v-8 h-14 a4 4 0 0 1 -4 -4 v-18 a4 4 0 0 1 4 -4 z"
+            fill="rgba(10,12,46,0.95)"
+          />
+        </svg>
+
+        <span className="font-[family-name:var(--font-pixel)] text-[8px] tracking-widest text-[color:var(--color-yellow)] leading-none">
+          GLOBAL CHAT
+        </span>
+
+        {/* Online count badge — top-left of the panel since the right edge
+            is flush against the viewport with no room for an external badge */}
+        <span
+          className="absolute top-1.5 left-1.5 min-w-[24px] h-[20px] px-1.5 flex items-center justify-center border-2 border-[color:var(--color-bg-deep)] bg-[color:var(--color-lime)] font-[family-name:var(--font-pixel)] text-[9px] tracking-tight text-[color:var(--color-bg-deep)] leading-none"
+          aria-hidden="true"
+        >
+          {onlineCount}
+        </span>
+      </button>
+    )
+  }
+
   return (
-    <div className="fixed bottom-4 right-4 z-30 w-[360px] max-w-[calc(100vw-2rem)]">
-      <div className="border-4 border-[color:var(--color-pink)] bg-[color:var(--color-bg-mid)] shadow-[4px_4px_0_0_var(--color-bg-deep)]">
-        {/* Header — click to collapse / expand */}
+    <div className="fixed bottom-0 right-0 z-30 w-[360px] max-w-[100vw] animate-panel-pop-br">
+      {/* Pin flush to the bottom-right viewport edge so the panel covers the
+          Gemini watermark area whether collapsed (orb) or expanded. Subtle
+          1px yellow border matches the PetInspector style. */}
+      <div className="border border-[color:var(--color-yellow)]/35 bg-[color:var(--color-bg-deep)]">
+        {/* Header — click to collapse */}
         <button
           type="button"
-          onClick={() => setCollapsed((c) => !c)}
-          className="flex w-full items-center justify-between border-b-4 border-[color:var(--color-bg-deep)] bg-[color:var(--color-bg-deep)] px-3 py-2 cursor-pointer"
-          aria-expanded={!collapsed}
+          onClick={() => setCollapsed(true)}
+          className="flex w-full items-center justify-between border-b border-[color:var(--color-yellow)]/20 bg-[rgba(10,12,46,0.5)] px-3 py-2 cursor-pointer"
+          aria-expanded="true"
         >
-          <span className="font-[family-name:var(--font-pixel)] text-[10px] uppercase tracking-widest text-[color:var(--color-pink)]">
+          <span className="font-[family-name:var(--font-pixel)] text-[10px] uppercase tracking-widest text-[color:var(--color-yellow)]">
             GLOBAL CHAT
           </span>
           <span className="flex items-center gap-2">
-            <span className="font-[family-name:var(--font-pixel)] text-[10px] tracking-widest text-[color:var(--color-cyan)]">
+            <span className="font-[family-name:var(--font-pixel)] text-[10px] tracking-widest text-[color:var(--color-ink-mid)]">
               {onlineCount} ONLINE
             </span>
-            <span className="font-[family-name:var(--font-pixel)] text-[10px] text-[color:var(--color-ink)]">
-              {collapsed ? '[+]' : '[-]'}
+            <span className="font-[family-name:var(--font-pixel)] text-[10px] text-[color:var(--color-ink-low)]">
+              [-]
             </span>
           </span>
         </button>
 
-        {!collapsed && (
-          <div className="flex flex-col">
+        <div className="flex flex-col">
             {/* Online users panel */}
-            <div className="border-b-4 border-[color:var(--color-bg-deep)] bg-[color:var(--color-bg-hi)] px-3 py-2 max-h-24 overflow-y-auto">
+            <div className="border-b border-[color:var(--color-yellow)]/15 bg-[rgba(10,12,46,0.3)] px-3 py-2 max-h-24 overflow-y-auto">
               <p className="font-[family-name:var(--font-pixel)] text-[8px] uppercase tracking-widest text-[color:var(--color-ink-mid)] mb-1">
                 ONLINE OWNERS
               </p>
@@ -157,7 +214,7 @@ export function GlobalChat() {
             </div>
 
             {/* Message list */}
-            <div className="px-3 py-2 h-64 overflow-y-auto bg-[color:var(--color-bg-mid)]">
+            <div className="px-3 py-2 h-64 overflow-y-auto bg-[rgba(10,12,46,0.2)]">
               {messages.length === 0 ? (
                 <p className="font-[family-name:var(--font-pixel-readable)] text-base text-[color:var(--color-ink-low)] text-center mt-8">
                   no messages yet — say hi
@@ -193,7 +250,7 @@ export function GlobalChat() {
             </div>
 
             {/* Input */}
-            <div className="border-t-4 border-[color:var(--color-bg-deep)] bg-[color:var(--color-bg-deep)] p-2">
+            <div className="border-t border-[color:var(--color-yellow)]/20 bg-[rgba(10,12,46,0.5)] p-2">
               {!isConnected || !address ? (
                 <p className="font-[family-name:var(--font-pixel)] text-[10px] tracking-widest text-[color:var(--color-yellow)] text-center py-1.5 animate-blink">
                   CONNECT WALLET TO CHAT
@@ -212,13 +269,13 @@ export function GlobalChat() {
                     }}
                     placeholder="type a message..."
                     maxLength={MAX_MESSAGE_LEN}
-                    className="flex-1 border-2 border-[color:var(--color-border)] bg-[color:var(--color-bg-mid)] px-2 py-1 font-[family-name:var(--font-pixel-readable)] text-base text-[color:var(--color-ink)] placeholder:text-[color:var(--color-ink-low)] outline-none focus:border-[color:var(--color-cyan)]"
+                    className="flex-1 border border-[color:var(--color-yellow)]/25 bg-[rgba(10,12,46,0.5)] px-2 py-1 font-[family-name:var(--font-pixel-readable)] text-base text-[color:var(--color-ink)] placeholder:text-[color:var(--color-ink-low)] outline-none focus:border-[color:var(--color-yellow)]/60"
                   />
                   <button
                     type="button"
                     onClick={handleSend}
                     disabled={draft.trim().length === 0}
-                    className="border-2 border-[color:var(--color-bg-deep)] bg-[color:var(--color-pink)] px-3 py-1 font-[family-name:var(--font-pixel)] text-[10px] tracking-widest text-[color:var(--color-bg-deep)] hover:bg-[color:var(--color-pink-hi)] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shadow-[2px_2px_0_0_var(--color-bg-deep)] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
+                    className="border border-[color:var(--color-yellow)]/50 bg-[color:var(--color-yellow)]/10 hover:bg-[color:var(--color-yellow)]/20 px-3 py-1 font-[family-name:var(--font-pixel)] text-[10px] tracking-widest text-[color:var(--color-yellow)] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
                   >
                     SEND
                   </button>
@@ -226,7 +283,6 @@ export function GlobalChat() {
               )}
             </div>
           </div>
-        )}
       </div>
     </div>
   )

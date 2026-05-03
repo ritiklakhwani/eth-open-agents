@@ -16652,10 +16652,10 @@
           "id": 4,
           "name": "mailbox",
           "type": "",
-          "x": 360,
-          "y": 210,
-          "width": 130,
-          "height": 130,
+          "x": 560,
+          "y": 290,
+          "width": 170,
+          "height": 230,
           "visible": true,
           "properties": [
             {
@@ -16674,10 +16674,10 @@
           "id": 5,
           "name": "office",
           "type": "",
-          "x": 30,
-          "y": 470,
+          "x": 380,
+          "y": 600,
           "width": 180,
-          "height": 200,
+          "height": 150,
           "visible": true,
           "properties": [
             {
@@ -16688,7 +16688,7 @@
             {
               "name": "label",
               "type": "string",
-              "value": "MARKETPLACE"
+              "value": "SUBSCRIPTIONS"
             }
           ]
         },
@@ -16748,7 +16748,7 @@
           "x": 30,
           "y": 0,
           "width": 130,
-          "height": 170,
+          "height": 320,
           "visible": true,
           "properties": [
             {
@@ -16780,7 +16780,7 @@
           "x": 170,
           "y": 0,
           "width": 130,
-          "height": 170,
+          "height": 320,
           "visible": true,
           "properties": [
             {
@@ -16812,7 +16812,7 @@
           "x": 310,
           "y": 0,
           "width": 130,
-          "height": 170,
+          "height": 320,
           "visible": true,
           "properties": [
             {
@@ -16844,7 +16844,7 @@
           "x": 450,
           "y": 0,
           "width": 130,
-          "height": 170,
+          "height": 320,
           "visible": true,
           "properties": [
             {

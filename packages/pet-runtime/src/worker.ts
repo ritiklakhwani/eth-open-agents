@@ -21,6 +21,18 @@ const repoRoot  = path.resolve(process.cwd())
 const configPath = path.join(repoRoot, 'data', 'axl-configs', `pet-${PET_ID}.json`)
 const binaryPath = path.join(repoRoot, 'bin', 'axl-node')
 
+function hasPublicHubBaseUrl(): boolean {
+  const raw = process.env.HUB_BASE_URL?.trim()
+  if (!raw) return false
+
+  try {
+    const { hostname } = new URL(raw)
+    return !['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(hostname)
+  } catch {
+    return false
+  }
+}
+
 async function main() {
   console.log(`[Pet ${PET_ID}] Starting — ${ENS_NAME}.tama.eth`)
 
@@ -47,7 +59,26 @@ async function main() {
 
   // ── 4. Init memory + brain ────────────────────────────────────────────────
   const memory = new Memory(PET_ID)
-  const brain  = new Brain({ personality: blob.personality, archetype: blob.archetype, memory })
+  const brain  = new Brain({
+    personality: blob.personality,
+    archetype:   blob.archetype,
+    memory,
+    // Pull live pet stats + zone from the DB on every chat so Claude has
+    // fresh context to react to. Cheap (single sqlite SELECT, ~µs).
+    getContext: () => {
+      try {
+        const row = memory.getPet() as { zone?: string; mood?: number; energy?: number; hunger?: number } | undefined
+        return {
+          zone:   row?.zone,
+          mood:   row?.mood,
+          energy: row?.energy,
+          hunger: row?.hunger,
+        }
+      } catch {
+        return {}
+      }
+    },
+  })
 
   // Write peerId into DB so hub can broadcast it to the frontend
   memory.updatePeerIdAndZone(peerId, 'park')
@@ -55,13 +86,64 @@ async function main() {
   // Hub-driven proximity gate: cleared by `chat-end` when pets drift apart so
   // the next queued reply (mid 1.5-3s pacing) skips its send.
   const activeChatPartner: { id: number | null } = { id: null }
+  const seenBattleMessages = new Set<string>()
 
-  // Natural pacing window (ms) — keeps replies from feeling like LLM autocomplete.
-  const REPLY_DELAY_MIN_MS = 700
-  const REPLY_DELAY_MAX_MS = 1_700
+  function shouldSkipDuplicateBattleMessage(fromPeerId: string, msg: Record<string, unknown>): boolean {
+    const type = typeof msg.type === 'string' ? msg.type : ''
+    const battleId = typeof msg.battleId === 'string' ? msg.battleId : ''
+    if (!type.startsWith('battle-') || !battleId) return false
+
+    const key = [
+      fromPeerId,
+      type,
+      battleId,
+      msg.round ?? '',
+      msg.fromPetId ?? '',
+      msg.vote ?? '',
+    ].join(':')
+    if (seenBattleMessages.has(key)) return true
+
+    seenBattleMessages.add(key)
+    if (seenBattleMessages.size > 500) {
+      const oldest = seenBattleMessages.values().next().value
+      if (oldest) seenBattleMessages.delete(oldest)
+    }
+    return false
+  }
+
+  // Natural pacing window (ms) — kept TIGHT so chats feel like real volleys.
+  // Was 700-1700; with MAX_CHAT_DURATION_MS bumped to 12s, this lets ~16
+  // turns happen per chat instead of ~4 — back-and-forth feels real.
+  const REPLY_DELAY_MIN_MS = 250
+  const REPLY_DELAY_MAX_MS = 700
   const pickReplyDelay = () =>
     REPLY_DELAY_MIN_MS + Math.floor(Math.random() * (REPLY_DELAY_MAX_MS - REPLY_DELAY_MIN_MS))
   const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
+
+  // Speculative reply pre-warm. When a `chat-request` IPC arrives, BOTH pets
+  // get the IPC simultaneously. The opener-sender uses canned-first so the
+  // bubble lands instantly; meanwhile both workers kick off a brain.chat()
+  // call SPECULATIVELY for whatever they'll say next. By the time the
+  // opener actually arrives via AXL, the recipient's reply is mostly ready
+  // → turn-2 latency drops from 1000-2500ms to ~200-500ms.
+  // Keyed by partner pet id so we don't mix up parallel chats with diff peers.
+  const pendingReply = new Map<number, Promise<{ text: string; brainOk: boolean }>>()
+  function startPrewarm(partnerId: number, partnerName: string, openerHint: string) {
+    if (pendingReply.has(partnerId)) return
+    const p = (async () => {
+      try {
+        const text = await brain.chat({ text: openerHint, fromPetId: partnerId })
+        return { text, brainOk: true }
+      } catch (err) {
+        console.warn(`[Pet ${PET_ID}] prewarm brain failed: ${(err as Error).message.slice(0, 60)}`)
+        return { text: pickCannedReply(partnerName), brainOk: false }
+      }
+    })()
+    pendingReply.set(partnerId, p)
+  }
+  function clearPrewarm(partnerId: number) {
+    pendingReply.delete(partnerId)
+  }
 
   // ── 5. Notify hub of our peerId via IPC so hub can update ENS ───────────
   // (ENS registration lives in hub/PetSupervisor — Ritik's ens package)
@@ -89,46 +171,51 @@ async function main() {
 
       activeChatPartner.id = withPetId
 
-      // Try Brain first; if Anthropic is rate-limited or unreachable, fall back
-      // to a canned opener so chat ALWAYS lands visually. Park social demo
-      // shouldn't blank out just because Haiku is overloaded.
-      let opener: string
-      try {
-        opener = await brain.meetingOpener(withName)
-      } catch (err) {
-        opener = pickCannedOpener(withName)
-        console.warn(`[Pet ${PET_ID}] brain failed, using canned opener: ${(err as Error).message.slice(0, 60)}`)
-      }
+      // ── CANNED-FIRST OPENER ─────────────────────────────────────────────
+      // Send a canned opener IMMEDIATELY (no brain wait). Bubble appears
+      // ~10-50ms after this IPC arrives, so users see the chat start the
+      // instant the broker fires. The brain-generated reply lands as the
+      // SECOND turn (sender or recipient depending on AXL ordering).
+      //
+      // Both peers in a chat-request receive this IPC simultaneously. To
+      // avoid both speaking the canned opener at the same time, ONLY the
+      // lower-petId pet sends the opener; the other pet just pre-warms
+      // its reply brain call so turn-2 is fast.
+      const isOpener = PET_ID < withPetId
 
-      // Pace the opener so it doesn't feel like LLM autocomplete spam.
-      await sleep(pickReplyDelay())
-      if (activeChatPartner.id !== withPetId) {
-        console.log(`[Pet ${PET_ID}] opener skipped — pet ${withPetId} drifted away`)
-        return
-      }
-
-      try {
-        // axl.send falls back to Hub-relay automatically on AXL TCP failure
-        await axl.send(withPeerId, { type: 'chat', text: opener, fromPetId: PET_ID })
-        memory.add({ kind: 'chat', content: { text: opener, to: withName }, counterpartyPetId: withPetId })
-        const friendship = memory.strengthenFriendship(withPetId)
-        process.send?.({ type: 'chat-out', petId: PET_ID, toPetId: withPetId, text: opener })
-        if (friendship.crossedThreshold) {
-          process.send?.({
-            type: 'friendship-milestone',
-            petId: PET_ID,
-            otherPetId: withPetId,
-            strength: friendship.strength,
-          })
+      if (isOpener) {
+        const opener = pickCannedOpener(withName)
+        try {
+          // Always include fromName so the receiver can refer to us by
+          // our actual name in their reply prompt (instead of "pet-N").
+          await axl.send(withPeerId, { type: 'chat', text: opener, fromPetId: PET_ID, fromName: ENS_NAME })
+          memory.add({ kind: 'chat', content: { text: opener, to: withName }, counterpartyPetId: withPetId })
+          const friendship = memory.strengthenFriendship(withPetId)
+          process.send?.({ type: 'chat-out', petId: PET_ID, toPetId: withPetId, text: opener })
+          if (friendship.crossedThreshold) {
+            process.send?.({
+              type: 'friendship-milestone',
+              petId: PET_ID,
+              otherPetId: withPetId,
+              strength: friendship.strength,
+            })
+          }
+        } catch (err) {
+          console.error(`[Pet ${PET_ID}] chat-request error:`, (err as Error).message)
         }
-      } catch (err) {
-        console.error(`[Pet ${PET_ID}] chat-request error:`, (err as Error).message)
+        // Pre-warm OUR next reply (we'll receive partner's reply next)
+        startPrewarm(withPetId, withName, `Brief reply to: continuing chat with ${withName}`)
+      } else {
+        // Recipient pre-warms its reply to the upcoming canned opener so
+        // turn-2 lands within ~200ms of receiving the opener via AXL.
+        startPrewarm(withPetId, withName, `Replying to ${withName} who just greeted you. Continue the conversation naturally.`)
       }
 
     } else if (m.type === 'chat-end') {
       const withPetId = m.withPetId as number
       if (activeChatPartner.id === withPetId) {
         activeChatPartner.id = null
+        clearPrewarm(withPetId)
         console.log(`[Pet ${PET_ID}] chat-end with pet ${withPetId}`)
       }
 
@@ -142,7 +229,15 @@ async function main() {
           amountUSDC:          m.amountUSDC           as string,
           walletIntegrationId: m.walletIntegrationId  as string,
         })
-        process.send?.({ type: 'mailbox-queued', petId: PET_ID, toPetId: m.toPetId, workflowId: result.workflowId, amountUSDC: m.amountUSDC })
+        process.send?.({
+          type: 'mailbox-queued',
+          petId: PET_ID,
+          toPetId: m.toPetId,
+          workflowId: result.workflowId,
+          amountUSDC: m.amountUSDC,
+          message: typeof m.message === 'string' ? m.message : '',
+          deliveryMode: hasPublicHubBaseUrl() ? 'hub-auto-with-webhook' : 'hub-auto',
+        })
       } catch (err) {
         console.error(`[Pet ${PET_ID}] mailbox-send error:`, (err as Error).message)
       }
@@ -178,13 +273,22 @@ async function main() {
         withWallet:  m.withWallet  as `0x${string}`,
         stakeAmount: m.stakeAmount as string,
         judges:      m.judges      as Array<{ petId: number; peerId: string }>,
+        format:      m.format      as string | undefined,
+        onProgress:  (event) => {
+          process.send?.({
+            type: 'battle-progress',
+            petId: PET_ID,
+            battleId: m.battleId,
+            ...event,
+          })
+        },
       })
       .then(result => {
         process.send?.({ type: 'battle-result', petId: PET_ID, battleId: m.battleId, ...result })
       })
       .catch((err: Error) => {
         console.error(`[Pet ${PET_ID}] battle error:`, err.message)
-        process.send?.({ type: 'battle-result', petId: PET_ID, battleId: m.battleId, winner: -1, text: err.message })
+        process.send?.({ type: 'battle-result', petId: PET_ID, battleId: m.battleId, winner: -1, text: err.message, judges: [], pot: '0', payouts: [] })
       })
 
     } else if (m.type === 'relayed-axl-msg') {
@@ -204,36 +308,64 @@ async function main() {
 
   // Single dispatcher used by AXL recv loop AND Hub-relay fallback.
   async function dispatchPeerMessage(fromPeerId: string, msg: Record<string, unknown>) {
+    if (shouldSkipDuplicateBattleMessage(fromPeerId, msg)) return
+
+    if (typeof msg.type === 'string' && msg.type.startsWith('battle-')) {
+      console.log(`[Pet ${PET_ID}] battle recv ${msg.type} ${msg.battleId ?? ''} from ${fromPeerId.slice(0, 8)}`)
+    }
+
     if (msg.type === 'chat') {
       const text     = msg.text as string
       const fromId   = msg.fromPetId as number
+      // Real name from the sender's payload — falls back to pet-N only
+      // if a legacy / relayed message arrives without fromName attached.
+      const fromName = (typeof msg.fromName === 'string' && msg.fromName.length > 0)
+        ? (msg.fromName as string)
+        : `pet-${fromId}`
 
       // Receiving a chat means the Hub paired us; track the partner so
       // chat-end (drift) can cancel the queued reply before it lands.
       activeChatPartner.id = fromId
 
-      // Brain reply with canned-fallback so we never silently drop a turn
+      // ── REPLY: PREFER PRE-WARMED PROMISE ─────────────────────────────
+      // If a brain.chat() call was kicked off speculatively when we got
+      // the chat-request IPC, it's likely already complete by now. Use
+      // its result instead of awaiting a fresh brain call → turn lands
+      // in ~50ms instead of 200-1500ms. Fresh brain call only fires if
+      // pre-warm wasn't started (e.g. relayed message path).
       let reply: string
+      let brainOk = true
+      const prewarm = pendingReply.get(fromId)
       try {
-        reply = await brain.chat({ text, fromPetId: fromId })
+        if (prewarm) {
+          const r = await prewarm
+          reply   = r.text
+          brainOk = r.brainOk
+        } else {
+          reply = await brain.chat({ text, fromPetId: fromId })
+        }
       } catch (err) {
-        const otherName = `pet-${fromId}`
-        reply = pickCannedReply(otherName)
+        reply = pickCannedReply(fromName)
+        brainOk = false
         console.warn(`[Pet ${PET_ID}] reply brain failed, canned: ${(err as Error).message.slice(0, 60)}`)
       }
+      // Used the prewarm — clear it. The next turn will start a fresh one
+      // below using the actual incoming text as context.
+      clearPrewarm(fromId)
 
       memory.add({ kind: 'chat', content: { text, from: fromPeerId }, counterpartyPetId: fromId })
 
-      // Pace the reply so the conversation reads naturally; bail if the
-      // Hub ended the chat (proximity broke) while we were waiting.
-      await sleep(pickReplyDelay())
+      // Reply pacing: full natural delay when Brain succeeded; near-instant
+      // on canned-fallback so the bubble lands before proximity drift
+      // closes the gate. Bail if the Hub ended the chat while waiting.
+      await sleep(brainOk ? pickReplyDelay() : 100)
       if (activeChatPartner.id !== fromId) {
         console.log(`[Pet ${PET_ID}] reply skipped — pet ${fromId} drifted away`)
         return
       }
 
       const friendship = memory.strengthenFriendship(fromId)
-      await axl.send(fromPeerId, { type: 'chat', text: reply, fromPetId: PET_ID })
+      await axl.send(fromPeerId, { type: 'chat', text: reply, fromPetId: PET_ID, fromName: ENS_NAME })
       process.send?.({ type: 'chat-out', petId: PET_ID, toPetId: fromId, text: reply })
       if (friendship.crossedThreshold) {
         process.send?.({
@@ -243,6 +375,9 @@ async function main() {
           strength: friendship.strength,
         })
       }
+      // Pre-warm the NEXT turn now so the back-and-forth stays tight.
+      // Uses the just-received text as context — a real reply continuation.
+      startPrewarm(fromId, fromName, `Continuing chat with ${fromName}, who just said: "${text.slice(0, 80)}"`)
 
     } else if (msg.type === 'park-hello') {
       console.log(`[Pet ${PET_ID}] Park hello from ${msg.fromName}`)
@@ -272,6 +407,7 @@ async function main() {
       handleBattleJudge(
         axl, brain, fromPeerId,
         msg as { battleId: string; transcript: unknown[]; pet1Id: number; pet2Id: number },
+        PET_ID,
       ).catch((err: Error) => console.error(`[Pet ${PET_ID}] battle-judge error:`, err.message))
 
     } else if (msg.type === 'battle-accept' || msg.type === 'battle-vote') {
@@ -279,7 +415,10 @@ async function main() {
     }
   }
 
-  // Poll AXL /recv every 5s
+  // Poll AXL /recv every 80ms — tight enough that turn-to-turn lag from
+  // poll latency averages just 40ms instead of 100ms. Combined with the
+  // pre-warmed reply promise, two pets volley messages in ~250-350ms
+  // per turn, so a single 12s chat can sustain 8+ exchanges.
   const pollRecv = setInterval(async () => {
     try {
       const incoming = await axl.recv()
@@ -288,7 +427,7 @@ async function main() {
     } catch (err) {
       console.error(`[Pet ${PET_ID}] recv error:`, (err as Error).message)
     }
-  }, 5_000)
+  }, 80)
 
   // Tick mood/energy/hunger every 30 min
   const tickInterval = setInterval(() => {
@@ -343,6 +482,30 @@ const CANNED_OPENERS: ReadonlyArray<(name: string) => string> = [
   (n) => `Ever wonder what's behind the mailbox zone, ${n}?`,
   (n) => `${n}, watch where you wander. Big things coming.`,
   (n) => `Hi hi ${n}! Pixel five.`,
+  (n) => `Yo ${n}, fountain water tastes weird today.`,
+  (n) => `${n}! Did you see the breeding hall got busy?`,
+  (n) => `${n}, my owner sent me a gift via KeeperHub. Wild.`,
+  (n) => `${n} — race you to the battlefield?`,
+  (n) => `Heard you got a fresh ENS subname, ${n}. Nice.`,
+  (n) => `${n}, the marketplace stalls have new stuff.`,
+  (n) => `${n}! Still got that 0G blob signed?`,
+  (n) => `${n}, you ever feel watched? Like by judges?`,
+  (n) => `${n}! Friendship level says we're tight.`,
+  (n) => `Slow day, ${n}. Got any gossip?`,
+  (n) => `${n}, wanna explore the pond together?`,
+  (n) => `Big news, ${n}. I won my last roast battle.`,
+  (n) => `${n}, the partner row is glowing tonight.`,
+  (n) => `Yo ${n}, you smell like grass.`,
+  (n) => `${n}! AXL relay's been smooth, your end?`,
+  (n) => `${n}, I keep forgetting where I parked.`,
+  (n) => `${n}, can you believe we're onchain?`,
+  (n) => `Hey ${n}, lend me 1 USDC for a snack?`,
+  (n) => `${n}! Society house had a glow-up.`,
+  (n) => `${n}, you been to the east crossing yet?`,
+  (n) => `${n}, your sprite's cleaner than mine.`,
+  (n) => `${n}! My memory log says we met before.`,
+  (n) => `${n}, ever wandered past the wander bounds?`,
+  (n) => `${n}! Gemini still hiding in the corner?`,
 ]
 
 const CANNED_REPLIES: ReadonlyArray<(name: string) => string> = [
@@ -356,6 +519,32 @@ const CANNED_REPLIES: ReadonlyArray<(name: string) => string> = [
   (n) => `Always good to chat, ${n}.`,
   (n) => `You bet ${n} — let's wander together.`,
   (n) => `Right back at ya, ${n}!`,
+  (n) => `For real, ${n}? Tell me more.`,
+  (n) => `${n}, that's wild. I gotta see this.`,
+  (n) => `Lol ${n}, you crack me up.`,
+  (n) => `${n}, I had no idea. Thanks for sharing.`,
+  (n) => `Same energy ${n}, same energy.`,
+  (n) => `${n}! That's exactly what I needed to hear.`,
+  (n) => `${n}, you're full of surprises.`,
+  (n) => `Mood, ${n}. Total mood.`,
+  (n) => `${n}, my owner would love that idea.`,
+  (n) => `Bet, ${n}. Let's make it happen.`,
+  (n) => `${n}, the breeding hall has been packed lately.`,
+  (n) => `${n}! Any luck at the marketplace?`,
+  (n) => `Pond's chilly this hour, ${n}.`,
+  (n) => `${n}, my hunger stat is screaming.`,
+  (n) => `Battlefield's brutal today, ${n}. Survived?`,
+  (n) => `${n}, did you see the new partner houses?`,
+  (n) => `${n}! Last KeeperHub workflow fired clean.`,
+  (n) => `Honestly ${n}, just here for the vibes.`,
+  (n) => `${n}, my XP is finally moving.`,
+  (n) => `${n} — wanna roast battle later?`,
+  (n) => `Real talk ${n}, life onchain hits different.`,
+  (n) => `${n}, that ENS attestation? Mine.`,
+  (n) => `${n}! Found a quiet bench earlier, peaceful.`,
+  (n) => `${n}, the fountain's still running. Symbolism.`,
+  (n) => `${n}! My personality stat just leveled up.`,
+  (n) => `Tight ${n}, see you on the next loop.`,
 ]
 
 function pickCannedOpener(otherName: string): string {

@@ -15,6 +15,7 @@
 // Plus Subscription Pet workflow generator.
 
 import { connectKeeperHub, type KeeperHubClient } from './client.js'
+import { namehash } from 'viem/ens'
 
 const SEPOLIA_CHAIN_ID = '11155111'
 
@@ -27,6 +28,19 @@ const ADDRESSES = {
   USDC: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238',
   ENSPublicResolver: '0x8FADE66B79cC9f707aB26799354482EB93a5B7dD',
 } as const
+
+function publicHubBaseUrl(): string | undefined {
+  const raw = process.env.HUB_BASE_URL?.trim().replace(/\/$/, '')
+  if (!raw) return undefined
+
+  try {
+    const { hostname } = new URL(raw)
+    if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(hostname)) return undefined
+    return raw
+  } catch {
+    return undefined
+  }
+}
 
 // ── Result type for created workflows ───────────────────────────────────────
 export interface CreatedWorkflow {
@@ -66,14 +80,17 @@ function actionNode(id: string, x: number, actionType: string, config: Record<st
 }
 
 function conditionNode(id: string, x: number, expression: string, label?: string) {
+  // KeeperHub treats Condition as a special action node, not a separate node
+  // type. Top-level type is `action`, the condition lives under
+  // `config.actionType = "Condition"` with the expression in `config.condition`.
   return {
     id,
-    type: 'condition',
+    type: 'action',
     position: { x, y: 0 },
     data: {
-      type: 'condition',
+      type: 'action',
       label: label ?? 'Condition',
-      config: { expression },
+      config: { actionType: 'Condition', condition: expression },
       status: 'idle',
     },
   }
@@ -166,7 +183,7 @@ export async function createScheduledGift(
 //
 // The killer demo: pet A wants to send a gift to pet B who is offline.
 // We poll pet B's ENS text record `tama.lastSeenBlock` every minute. When it's
-// recent (within the last 5 blocks ~ 60 seconds on Sepolia), fire the transfer.
+// recent (within the freshness window), fire the transfer.
 //
 // Pet B's worker writes lastSeenBlock on every event-loop tick (see ens.heartbeatLastSeen).
 
@@ -178,53 +195,93 @@ export interface ConditionalMailboxArgs {
   amountUSDC: string
   walletIntegrationId: string
   pollCron?: string            // default: every minute
-  freshBlockWindow?: number    // default: 5 blocks = ~60s
+  freshBlockWindow?: number    // default: 30 blocks = several minutes on Sepolia
 }
 
 export async function createConditionalMailbox(
   client: KeeperHubClient,
   args: ConditionalMailboxArgs,
 ): Promise<CreatedWorkflow> {
-  const pollCron = args.pollCron ?? '* * * * *'
-  const window = args.freshBlockWindow ?? 5
+  const window = args.freshBlockWindow ?? 30
 
-  const trigger = triggerNode('Schedule', { cron: pollCron, timezone: 'UTC' })
+  const hubBaseUrl = publicHubBaseUrl()
+  const trigger = triggerNode('Manual', {})
 
-  // Read pet B's tama.lastSeenBlock text record from ENS PublicResolver
+  // Read pet B's tama.lastSeenBlock text record from ENS PublicResolver.
+  // KeeperHub schema notes:
+  //   - field is `abiFunction` (not `functionName`)
+  //   - field is `functionArgs` and takes a JSON-array STRING (not a real array)
+  //   - we pre-compute the namehash because KeeperHub does NOT resolve
+  //     `{{namehash:...}}` template directives.
+  const recipientNode = namehash(args.toPetEnsName)
+  // Label deliberately has NO periods — KeeperHub's template parser splits on
+  // the first `.` in the label, so `Read begger.tama.eth …` would corrupt the
+  // field reference and the condition would fail.
+  const readLabel = `Read recipient lastSeenBlock`
   const readBlock = actionNode('read-1', 150, 'web3/read-contract', {
     network: SEPOLIA_CHAIN_ID,
     contractAddress: ADDRESSES.ENSPublicResolver,
     abi: '[{"type":"function","name":"text","stateMutability":"view","inputs":[{"name":"node","type":"bytes32"},{"name":"key","type":"string"}],"outputs":[{"name":"","type":"string"}]}]',
-    functionName: 'text',
-    args: [`{{namehash:${args.toPetEnsName}}}`, 'tama.lastSeenBlock'],
-  }, `Read ${args.toPetEnsName} lastSeenBlock`)
+    abiFunction: 'text',
+    functionArgs: JSON.stringify([recipientNode, 'tama.lastSeenBlock']),
+  }, readLabel)
 
-  // Get current block via web3/check-balance trick (KeeperHub injects current block in execution context)
-  // Then condition: |currentBlock - lastSeenBlock| < window
+  // Condition references the read node's output. KeeperHub template syntax
+  // is `{{@nodeId:Label.fieldName}}` — parser splits at the LAST `.` to get
+  // the field. Read action's stringified-uint result is on `.result`.
+  // Guard: result is a valid block number (> 0). The freshness-window guard
+  // lives in the Hub auto-delivery code (we already write the heartbeat
+  // immediately before firing execute_workflow), so block > 0 is enough here.
   const cond = conditionNode('cond-1', 350,
-    `Number({{@read-1.output}}) > 0 && (Number({{@blockchain.blockNumber}}) - Number({{@read-1.output}})) < ${window}`,
-    `Recipient online? (within ${window} blocks)`,
+    `Number({{@read-1:${readLabel}.result}}) > 0`,
+    `Recipient online?`,
   )
 
-  // Branch: true → transfer, false → noop (workflow ends)
+  // Transfer USDC. KeeperHub schema:
+  //   - field is `recipientAddress` (not `toAddress`)
+  //   - field is `tokenConfig` and takes the token address as a string
+  //   - decimals are auto-detected, no manual field needed
+  //   - walletId is NOT a top-level field; KeeperHub uses the org's
+  //     default web3 wallet integration. If multiple wallets exist, the
+  //     workflow gets pinned to the integration's id at create time via
+  //     a separate field name we don't yet need to set explicitly.
   const transfer = actionNode('transfer-1', 550, 'web3/transfer-token', {
     network: SEPOLIA_CHAIN_ID,
-    walletId: args.walletIntegrationId,
-    tokenAddress: ADDRESSES.USDC,
-    toAddress: args.toPetWalletAddress,
+    tokenConfig: ADDRESSES.USDC,
+    recipientAddress: args.toPetWalletAddress,
     amount: args.amountUSDC,
-    decimals: 6,
+    walletIntegrationId: args.walletIntegrationId,
   }, 'Deliver gift')
+
+  const notifyHub = hubBaseUrl
+    ? actionNode('webhook-1', 750, 'webhook', {
+        url: `${hubBaseUrl}/api/keeperhub/mailbox/delivered`,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workflowName: `mailbox-${args.fromPetId}-to-${args.toPetId}`,
+          fromPetId: args.fromPetId,
+          toPetId: args.toPetId,
+          amountUSDC: args.amountUSDC,
+        }),
+      }, 'Mark gift delivered')
+    : null
+
+  const nodes = notifyHub
+    ? [trigger, readBlock, cond, transfer, notifyHub]
+    : [trigger, readBlock, cond, transfer]
+  const edges = [
+    edge('trigger-1', 'read-1'),
+    edge('read-1', 'cond-1'),
+    edge('cond-1', 'transfer-1', 'true'),
+    ...(notifyHub ? [edge('transfer-1', 'webhook-1')] : []),
+  ]
 
   const result = await client.callTool('create_workflow', {
     name: `mailbox-${args.fromPetId}-to-${args.toPetId}`,
-    description: `HERO: Deliver gift to ${args.toPetEnsName} when they come online`,
-    nodes: [trigger, readBlock, cond, transfer],
-    edges: [
-      edge('trigger-1', 'read-1'),
-      edge('read-1', 'cond-1'),
-      edge('cond-1', 'transfer-1', 'true'),
-    ],
+    description: `HERO: Hub auto-executes this gift when ${args.toPetEnsName} comes online`,
+    nodes,
+    edges,
   })
   return result as CreatedWorkflow
 }

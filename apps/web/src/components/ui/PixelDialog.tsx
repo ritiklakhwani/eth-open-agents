@@ -46,23 +46,31 @@ export function PixelDialog({
       role="dialog"
       aria-modal="true"
     >
-      {/* Backdrop — solid dark with scanline overlay implied via global CSS */}
+      {/* Backdrop — translucent so the cozy map shows through behind the modal */}
       <div
-        className="absolute inset-0 bg-[color:var(--color-bg-deep)]/85"
+        className="absolute inset-0 bg-[color:var(--color-bg-deep)]/70 backdrop-blur-[2px]"
         onClick={onClose}
       />
 
-      {/* Card */}
-      <div className={`relative w-full ${sizeMap[size]}`}>
+      {/* Card — warm cozy-night variant; matches the HUDs */}
+      <div
+        className={[
+          `relative w-full ${sizeMap[size]}`,
+          'flex min-h-0 flex-col',
+          'max-h-[min(92dvh,52rem)]',
+        ].join(' ')}
+      >
         <PixelCard
-          variant="pink"
+          variant="warm"
           title={title}
+          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          bodyClassName="min-h-0 flex-1 overflow-y-auto overscroll-y-contain p-4"
           headerRight={
             !hideCloseButton && (
               <button
                 onClick={onClose}
                 aria-label="Close"
-                className="font-[family-name:var(--font-pixel)] text-xs text-[color:var(--color-ink-mid)] hover:text-[color:var(--color-pink)] cursor-pointer"
+                className="font-[family-name:var(--font-pixel)] text-xs text-[color:var(--color-ink-low)] hover:text-[color:var(--color-yellow)] cursor-pointer"
               >
                 [ X ]
               </button>

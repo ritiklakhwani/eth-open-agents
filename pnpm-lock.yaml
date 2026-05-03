@@ -26,6 +26,9 @@ importers:
       contracts-sdk:
         specifier: workspace:*
         version: link:../../packages/contracts-sdk
+      deployer-tx-lock:
+        specifier: workspace:*
+        version: link:../../packages/deployer-tx-lock
       dotenv:
         specifier: ^17.4.2
         version: 17.4.2
@@ -38,6 +41,9 @@ importers:
       keeperhub:
         specifier: workspace:*
         version: link:../../packages/keeperhub
+      og-storage:
+        specifier: workspace:*
+        version: link:../../packages/og-storage
       shared-types:
         specifier: workspace:*
         version: link:../../packages/shared-types
@@ -143,6 +149,8 @@ importers:
         specifier: ^2.48.4
         version: 2.48.4(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@5.0.10)(zod@4.3.6)
 
+  packages/deployer-tx-lock: {}
+
   packages/ens:
     dependencies:
       viem:
@@ -154,6 +162,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.3.6)
+      viem:
+        specifier: ^2.48.4
+        version: 2.48.4(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@5.0.10)(zod@4.3.6)
     devDependencies:
       '@types/node':
         specifier: ^25.6.0
@@ -185,6 +196,9 @@ importers:
       contracts-sdk:
         specifier: workspace:*
         version: link:../contracts-sdk
+      deployer-tx-lock:
+        specifier: workspace:*
+        version: link:../deployer-tx-lock
       dotenv:
         specifier: ^17.4.2
         version: 17.4.2
@@ -6263,7 +6277,7 @@ snapshots:
 
   '@scure/bip32@1.7.0':
     dependencies:
-      '@noble/curves': 1.9.1
+      '@noble/curves': 1.9.7
       '@noble/hashes': 1.8.0
       '@scure/base': 1.2.6
 
@@ -9666,7 +9680,7 @@ snapshots:
   ox@0.6.7(typescript@5.9.3)(zod@3.25.76):
     dependencies:
       '@adraffy/ens-normalize': 1.11.1
-      '@noble/curves': 1.9.1
+      '@noble/curves': 1.9.7
       '@noble/hashes': 1.8.0
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0
@@ -9680,7 +9694,7 @@ snapshots:
   ox@0.6.9(typescript@5.9.3)(zod@3.25.76):
     dependencies:
       '@adraffy/ens-normalize': 1.11.1
-      '@noble/curves': 1.9.1
+      '@noble/curves': 1.9.7
       '@noble/hashes': 1.8.0
       '@scure/bip32': 1.7.0
       '@scure/bip39': 1.6.0

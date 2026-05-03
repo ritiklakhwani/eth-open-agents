@@ -52,15 +52,6 @@ export function MailboxFlow({ open, onClose, petId }: MailboxFlowProps) {
   const [sendError, setSendError] = useState<string | null>(null)
   const [sentResult, setSentResult] = useState<SendResp | null>(null)
 
-  // Trigger-now state (demo helper that bypasses ENS condition)
-  const [triggering, setTriggering] = useState(false)
-  const [triggerResult, setTriggerResult] = useState<{
-    workflowName: string
-    executionId: string | null
-    status: string
-  } | null>(null)
-  const [triggerError, setTriggerError] = useState<string | null>(null)
-
   useEffect(() => {
     if (!open) return
     void loadInbox()
@@ -111,43 +102,10 @@ export function MailboxFlow({ open, onClose, petId }: MailboxFlowProps) {
   function backToInbox() {
     setView('inbox')
     setSentResult(null)
-    setTriggerResult(null)
-    setTriggerError(null)
     setToName('')
     setMessage('')
     setGiftAmount('')
     void loadInbox()
-  }
-
-  /// Demo helper: KeeperHub mailbox workflows are conditional (poll ENS
-  /// lastSeenBlock). We don't write that record so they never fire organically.
-  /// This bypasses the condition and runs the action immediately so judges
-  /// see the USDC actually move on Sepolia.
-  async function triggerNow() {
-    setTriggering(true)
-    setTriggerError(null)
-    setTriggerResult(null)
-    try {
-      const res = await fetch('/api/keeperhub/workflow/trigger-latest', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ petId, kind: 'mailbox' }),
-      })
-      if (!res.ok) {
-        const { error } = (await res.json()) as { error?: string }
-        throw new Error(error ?? `trigger failed (${res.status})`)
-      }
-      const json = (await res.json()) as {
-        workflowName: string
-        executionId: string | null
-        status: string
-      }
-      setTriggerResult(json)
-    } catch (err) {
-      setTriggerError((err as Error).message)
-    } finally {
-      setTriggering(false)
-    }
   }
 
   return (
@@ -284,47 +242,6 @@ export function MailboxFlow({ open, onClose, petId }: MailboxFlowProps) {
               <Row label="STATUS" value={sentResult.status.toUpperCase()} valueColor="var(--color-yellow)" />
             </div>
           </PixelCard>
-
-          {/* Demo helper — manually fire the workflow because Phase 3 ENS
-              isn't wired so the condition never becomes true organically */}
-          {!triggerResult && (
-            <div className="flex flex-col gap-2 border-2 border-dashed border-[color:var(--color-yellow)] p-3">
-              <p className="font-[family-name:var(--font-pixel-readable)] text-sm text-[color:var(--color-ink-mid)]">
-                Skip the wait? Fire the workflow now to move USDC immediately.
-              </p>
-              <div className="flex justify-end">
-                <PixelButton
-                  variant="success"
-                  size="sm"
-                  loading={triggering}
-                  onClick={triggerNow}
-                >
-                  ▷ TRIGGER NOW (DEMO)
-                </PixelButton>
-              </div>
-              {triggerError && (
-                <p className="font-[family-name:var(--font-pixel)] text-xs text-[color:var(--color-red)]">
-                  ! {triggerError}
-                </p>
-              )}
-            </div>
-          )}
-
-          {triggerResult && (
-            <PixelCard variant="cyan" title="EXECUTION FIRED">
-              <div className="flex flex-col gap-2">
-                <Row label="WORKFLOW" value={triggerResult.workflowName} valueColor="var(--color-cyan)" />
-                <Row label="STATUS" value={triggerResult.status.toUpperCase()} valueColor="var(--color-lime)" />
-                {triggerResult.executionId && (
-                  <Row label="EXEC ID" value={short(triggerResult.executionId)} valueColor="var(--color-yellow)" />
-                )}
-                <p className="font-[family-name:var(--font-pixel-readable)] text-sm text-[color:var(--color-ink)] mt-2">
-                  Watch the recipient&apos;s wallet on Sepolia Etherscan — USDC
-                  should arrive within ~30 seconds.
-                </p>
-              </div>
-            </PixelCard>
-          )}
 
           <div className="flex justify-end gap-3">
             <PixelButton variant="ghost" onClick={backToInbox}>← Back to inbox</PixelButton>

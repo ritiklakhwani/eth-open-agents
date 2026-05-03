@@ -1,10 +1,9 @@
 // /api/keeperhub/mailbox/send — proxy to Hub :3001 with payload translation.
 //
 // Frontend POSTs:    { fromPetId, toPetName, message, giftAmountUsdc }
-// Hub expects:       { fromPetId, toPetId,   amountUSDC }
+// Hub expects:       { fromPetId, toPetId,   amountUSDC, message }
 //
-// We resolve toPetName → toPetId via Hub `/api/pets`. The `message` field is
-// dropped (Hub only forwards USDC; messages are cosmetic for now).
+// We resolve toPetName → toPetId via Hub `/api/pets`.
 //
 // On Hub timeout/error we fall back to the canned response so the UI keeps
 // working even when the Hub isn't running.
@@ -47,6 +46,7 @@ export async function POST(req: Request) {
             fromPetId: body.fromPetId,
             toPetId:   recipient.token_id,
             amountUSDC,
+            message: body.message.trim(),
           },
         },
       )
@@ -60,7 +60,8 @@ export async function POST(req: Request) {
         status: 'pending',
         fromPetId: body.fromPetId,
         toPetName: body.toPetName,
-        triggerCondition: 'target ENS lastSeenBlock within 5 of head',
+        message: body.message.trim(),
+        triggerCondition: 'target ENS lastSeenBlock within 30 blocks of head',
         estimatedDeliveryMs: 'when recipient comes online',
       }
     },
@@ -69,7 +70,8 @@ export async function POST(req: Request) {
       status: 'pending',
       fromPetId: body.fromPetId,
       toPetName: body.toPetName,
-      triggerCondition: 'target ENS lastSeenBlock within 5 of head',
+      message: body.message.trim(),
+      triggerCondition: 'target ENS lastSeenBlock within 30 blocks of head',
       estimatedDeliveryMs: 'when recipient comes online',
     }),
   )

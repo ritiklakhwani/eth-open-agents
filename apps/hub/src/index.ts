@@ -16,6 +16,8 @@ import { initDB } from './db'
 import { PetSupervisor } from './PetSupervisor'
 import { registerGlobalChat } from './global-chat'
 import type { Zone } from 'shared-types'
+import { battleIdToEscrowKey } from 'contracts-sdk'
+import { connectKeeperHub } from 'keeperhub/client.js'
 
 // ── Shared event bus (pet workers → SSE clients) ─────────────────────────────
 const petEvents = new EventEmitter()
@@ -23,15 +25,222 @@ const petEvents = new EventEmitter()
 // ── DB + Supervisor ───────────────────────────────────────────────────────────
 const db         = initDB()
 const supervisor = new PetSupervisor(db)
+let worldIO: SocketIOServer | undefined
 
 // ── Fastify ───────────────────────────────────────────────────────────────────
 const app = Fastify({ logger: true })
 await app.register(cors, { origin: '*' })
 
+type MailboxDeliveredBody = {
+  workflowId?: string
+  workflowName?: string
+  fromPetId?: number
+  toPetId?: number
+  amountUSDC?: string | number
+  executionId?: string | null
+}
+
+type MailboxWorkflowPayload = {
+  toPetId?: number | string
+  amountUSDC?: string | number
+  message?: string
+  deliveryMode?: string
+  deliveredAt?: number
+  executionId?: string | null
+  lastAutoDeliveryAttemptAt?: number
+  lastAutoDeliveryError?: string
+}
+
+function parseMailboxPayload(payload: string | null): MailboxWorkflowPayload {
+  try {
+    return JSON.parse(payload ?? '{}') as MailboxWorkflowPayload
+  } catch {
+    return {}
+  }
+}
+
+function hasPublicHubBaseUrl(): boolean {
+  const raw = process.env.HUB_BASE_URL?.trim()
+  if (!raw) return false
+
+  try {
+    const { hostname } = new URL(raw)
+    return !['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(hostname)
+  } catch {
+    return false
+  }
+}
+
+function markMailboxWorkflowDelivered(body: MailboxDeliveredBody):
+  | { ok: true; workflowId: string; status: 'completed'; deliveredAt: number }
+  | { ok: false; error: string } {
+  const { workflowId, workflowName, fromPetId, toPetId, amountUSDC, executionId } = body
+
+  type Row = { id: string; pet_id: number; payload: string | null }
+  let row: Row | undefined
+  const nameMatch = workflowName?.match(/^mailbox-(\d+)-to-(\d+)$/)
+  const lookupFromPetId = typeof fromPetId === 'number' && Number.isFinite(fromPetId)
+    ? fromPetId
+    : nameMatch ? Number(nameMatch[1]) : undefined
+  const lookupToPetId = typeof toPetId === 'number' && Number.isFinite(toPetId)
+    ? toPetId
+    : nameMatch ? Number(nameMatch[2]) : undefined
+
+  if (workflowId) {
+    row = db.prepare(
+      "SELECT id, pet_id, payload FROM keeperhub_workflows WHERE id = ? AND kind = 'mailbox'",
+    ).get(workflowId) as Row | undefined
+  }
+
+  if (!row && lookupFromPetId !== undefined && lookupToPetId !== undefined) {
+    const candidates = db.prepare(
+      "SELECT id, pet_id, payload FROM keeperhub_workflows WHERE kind = 'mailbox' AND pet_id = ? AND status = 'active' ORDER BY created_at DESC",
+    ).all(lookupFromPetId) as Row[]
+
+    row = candidates.find((candidate) => {
+      const payload = parseMailboxPayload(candidate.payload)
+      const sameRecipient = Number(payload.toPetId) === lookupToPetId
+      const sameAmount = amountUSDC === undefined || String(payload.amountUSDC ?? '') === String(amountUSDC)
+      return sameRecipient && sameAmount
+    })
+  }
+
+  if (!row) {
+    return { ok: false, error: 'mailbox workflow not found' }
+  }
+
+  const payload = parseMailboxPayload(row.payload) as Record<string, unknown>
+  const deliveredAt = Date.now()
+  const nextPayload: Record<string, unknown> = {
+    ...payload,
+    deliveredAt,
+    executionId: executionId ?? payload.executionId ?? null,
+  }
+
+  db.prepare(
+    "UPDATE keeperhub_workflows SET status = 'completed', payload = ? WHERE id = ? AND kind = 'mailbox'",
+  ).run(JSON.stringify(nextPayload), row.id)
+
+  worldIO?.to('world').emit('activity', {
+    type: 'mailbox-delivered',
+    petId: row.pet_id,
+    toPetId: typeof nextPayload.toPetId === 'number' ? nextPayload.toPetId : lookupToPetId,
+    workflowId: row.id,
+    timestamp: deliveredAt,
+  })
+
+  return { ok: true, workflowId: row.id, status: 'completed', deliveredAt }
+}
+
+function startMailboxAutoDelivery() {
+  if (!process.env.KEEPERHUB_API_KEY) {
+    console.warn('[Mailbox] Auto-delivery disabled: KEEPERHUB_API_KEY not set')
+    return
+  }
+
+  type Row = { id: string; pet_id: number; payload: string | null }
+  type PetRow = { name: string | null; peer_id: string | null }
+  const inFlight = new Set<string>()
+  let running = false
+
+  const tick = async () => {
+    if (running) return
+    running = true
+    try {
+      const rows = db.prepare(
+        "SELECT id, pet_id, payload FROM keeperhub_workflows WHERE kind = 'mailbox' AND status = 'active' ORDER BY created_at ASC",
+      ).all() as Row[]
+
+      for (const row of rows) {
+        if (inFlight.has(row.id)) continue
+        const payload = parseMailboxPayload(row.payload)
+
+        const toPetId = Number(payload.toPetId)
+        if (!Number.isFinite(toPetId)) continue
+
+        const toPet = db.prepare('SELECT name, peer_id FROM pets WHERE token_id = ?')
+          .get(toPetId) as PetRow | undefined
+        if (!toPet?.name || !toPet.peer_id || !supervisor.hasWorker(toPetId)) {
+          console.log(`[Mailbox] Workflow ${row.id} waiting for recipient pet ${toPetId} to be online`)
+          continue
+        }
+
+        const now = Date.now()
+        const lastAttempt = typeof payload.lastAutoDeliveryAttemptAt === 'number'
+          ? payload.lastAutoDeliveryAttemptAt
+          : 0
+        if (lastAttempt + 120_000 > now) continue
+
+        inFlight.add(row.id)
+        try {
+          const nextPayload = {
+            ...payload,
+            lastAutoDeliveryAttemptAt: now,
+            lastAutoDeliveryError: undefined,
+            autoDeliveryMode: hasPublicHubBaseUrl() ? 'hub-auto-with-webhook' : 'hub-auto',
+          }
+          db.prepare(
+            "UPDATE keeperhub_workflows SET payload = ? WHERE id = ? AND kind = 'mailbox' AND status = 'active'",
+          ).run(JSON.stringify(nextPayload), row.id)
+
+          await supervisor.bumpLastSeen(toPet.name)
+
+          const client = await connectKeeperHub()
+          let executionId: string | null = null
+          try {
+            const exec = await client.callTool('execute_workflow', { id: row.id }) as { executionId?: string }
+            executionId = exec.executionId ?? null
+          } finally {
+            await client.close()
+          }
+
+          const result = markMailboxWorkflowDelivered({
+            workflowId: row.id,
+            fromPetId: row.pet_id,
+            toPetId,
+            amountUSDC: payload.amountUSDC,
+            executionId,
+          })
+          if (!result.ok) {
+            console.warn(`[Mailbox] Auto-delivery could not mark ${row.id}: ${result.error}`)
+          } else {
+            console.log(`[Mailbox] Auto-delivered workflow ${row.id} to pet ${toPetId} via KeeperHub execute_workflow`)
+          }
+        } catch (err) {
+          const latestPayload = parseMailboxPayload(row.payload)
+          db.prepare(
+            "UPDATE keeperhub_workflows SET payload = ? WHERE id = ? AND kind = 'mailbox' AND status = 'active'",
+          ).run(JSON.stringify({
+            ...latestPayload,
+            lastAutoDeliveryAttemptAt: Date.now(),
+            lastAutoDeliveryError: (err as Error).message.slice(0, 200),
+          }), row.id)
+          console.warn(`[Mailbox] Auto-delivery failed for ${row.id}: ${(err as Error).message}`)
+        } finally {
+          inFlight.delete(row.id)
+        }
+      }
+    } finally {
+      running = false
+    }
+  }
+
+  setTimeout(() => { void tick() }, 5_000)
+  setInterval(() => { void tick() }, 15_000)
+  console.log(`[Mailbox] Auto-delivery bridge enabled (${hasPublicHubBaseUrl() ? 'public webhook acknowledgements enabled' : 'local mode'})`)
+}
+
 // ── REST routes ───────────────────────────────────────────────────────────────
 app.get('/api/pets', () =>
   db.prepare('SELECT * FROM pets').all()
 )
+
+app.get('/api/keeperhub/webhook/health', () => ({
+  ok: true,
+  mode: hasPublicHubBaseUrl() ? 'hub-auto-with-webhook' : 'hub-auto',
+  hubBaseUrl: hasPublicHubBaseUrl() ? process.env.HUB_BASE_URL?.trim().replace(/\/$/, '') : null,
+  timestamp: Date.now(),
+}))
 
 app.get<{ Params: { id: string } }>('/api/pets/:id', (req, reply) => {
   const pet = db.prepare('SELECT * FROM pets WHERE token_id = ?').get(req.params.id)
@@ -71,10 +280,11 @@ app.get<{ Params: { petId: string } }>('/api/sse/:petId', (req, reply) => {
 })
 
 // ── KeeperHub: mailbox send ───────────────────────────────────────────────────
-app.post<{ Body: { fromPetId: number; toPetId: number; amountUSDC: string } }>(
+app.post<{ Body: { fromPetId: number; toPetId: number; amountUSDC: string; message?: string } }>(
   '/api/keeperhub/mailbox/send',
   (req, reply) => {
     const { fromPetId, toPetId, amountUSDC } = req.body
+    const message = typeof req.body.message === 'string' ? req.body.message.slice(0, 200) : ''
     const toPet = db.prepare('SELECT ens_name, wallet_address FROM pets WHERE token_id = ?')
       .get(toPetId) as { ens_name: string; wallet_address: string } | undefined
     if (!toPet) return reply.status(404).send({ error: 'Recipient pet not found' })
@@ -85,6 +295,7 @@ app.post<{ Body: { fromPetId: number; toPetId: number; amountUSDC: string } }>(
       toPetEnsName:        toPet.ens_name,
       toPetWalletAddress:  toPet.wallet_address,
       amountUSDC,
+      message,
       walletIntegrationId: process.env.KEEPERHUB_WALLET_INTEGRATION_ID ?? '',
     })
     return { ok: true }
@@ -93,8 +304,8 @@ app.post<{ Body: { fromPetId: number; toPetId: number; amountUSDC: string } }>(
 
 // ── KeeperHub: mailbox inbox (real workflow state) ────────────────────────────
 // Returns mailbox workflows touching this pet, split into:
-//   inbox   — gifts addressed to me (payload.toPetId === petId)
-//   pending — gifts I sent that are queued (pet_id === petId, status active)
+//   inbox   — gifts addressed to me that have actually completed delivery
+//   pending — gifts I sent that are still queued (pet_id === petId, status active)
 // Display names resolved via the pets table.
 app.get<{ Querystring: { petId: string } }>(
   '/api/keeperhub/mailbox/inbox',
@@ -120,19 +331,22 @@ app.get<{ Querystring: { petId: string } }>(
     const inbox: InboxItem[] = []
     const pending: PendingItem[] = []
 
+    const deliveredStatuses = new Set(['completed', 'delivered'])
+
     for (const r of rows) {
-      let payload: { toPetId?: number; amountUSDC?: string | number } = {}
+      let payload: { toPetId?: number; amountUSDC?: string | number; deliveredAt?: number; message?: string } = {}
       try { payload = JSON.parse(r.payload ?? '{}') } catch {}
       const toPetId = typeof payload.toPetId === 'number' ? payload.toPetId : undefined
       const amount = Number(payload.amountUSDC ?? 0) || 0
+      const message = typeof payload.message === 'string' ? payload.message : ''
 
-      if (toPetId === petId) {
+      if (toPetId === petId && deliveredStatuses.has(r.status)) {
         inbox.push({
           id: r.id,
           from: petNames.get(r.pet_id) ?? `pet-${r.pet_id}`,
-          message: '',
+          message,
           giftAmountUsdc: amount,
-          deliveredAt: r.created_at,
+          deliveredAt: typeof payload.deliveredAt === 'number' ? payload.deliveredAt : r.created_at,
           status: r.status,
         })
       }
@@ -141,9 +355,9 @@ app.get<{ Querystring: { petId: string } }>(
         pending.push({
           id: r.id,
           to: toPetId !== undefined ? (petNames.get(toPetId) ?? `pet-${toPetId}`) : 'unknown',
-          message: '',
+          message,
           giftAmountUsdc: amount,
-          triggerCondition: 'recipient ENS lastSeenBlock within 5 of head',
+          triggerCondition: 'recipient ENS lastSeenBlock within 30 blocks of head',
           status: r.status,
         })
       }
@@ -152,6 +366,18 @@ app.get<{ Querystring: { petId: string } }>(
     return { petId, inbox, pending }
   },
 )
+
+// KeeperHub calls this after a mailbox transfer executes. The demo
+// trigger-latest route also calls it after execute_workflow succeeds.
+app.post<{
+  Body: MailboxDeliveredBody
+}>('/api/keeperhub/mailbox/delivered', (req, reply) => {
+  const result = markMailboxWorkflowDelivered(req.body)
+  if (!result.ok) {
+    return reply.status(404).send({ error: result.error })
+  }
+  return result
+})
 
 // ── KeeperHub: subscription scan + approve ────────────────────────────────────
 app.post<{ Body: { petId: number } }>('/api/keeperhub/subscription/scan', (req) => {
@@ -173,23 +399,54 @@ app.post<{ Body: { petId: number; subscriptionId: number } }>(
 )
 
 // ── Battle: start ─────────────────────────────────────────────────────────────
-app.post<{ Body: { petAId: number; petBId: number; stakeAmount: string } }>(
+app.post<{ Body: { petAId: number; petBId: number; stakeAmount: string; format?: string } }>(
   '/api/battle/start',
   (req, reply) => {
     const { petAId, petBId, stakeAmount } = req.body
-    type PetRow = { peer_id: string | null; name: string; wallet_address: string }
+    const format = req.body.format ?? 'debate'
+    type PetRow = { peer_id: string | null; name: string; ens_name: string | null; wallet_address: string }
     const petA = db.prepare('SELECT peer_id, name, wallet_address FROM pets WHERE token_id = ?').get(petAId) as PetRow | undefined
-    const petB = db.prepare('SELECT peer_id, name, wallet_address FROM pets WHERE token_id = ?').get(petBId) as PetRow | undefined
-    if (!petA?.peer_id || !petB?.peer_id) return reply.status(400).send({ error: 'Pets not ready' })
+    const petB = db.prepare('SELECT peer_id, name, ens_name, wallet_address FROM pets WHERE token_id = ?').get(petBId) as PetRow | undefined
+    if (!petA?.peer_id || !petB?.peer_id || !supervisor.hasWorker(petAId) || !supervisor.hasWorker(petBId)) {
+      return reply.status(400).send({ error: 'Pets not ready' })
+    }
 
-    const judges = db.prepare(
-      'SELECT token_id, peer_id FROM pets WHERE token_id NOT IN (?, ?) AND peer_id IS NOT NULL LIMIT 3'
-    ).all(petAId, petBId) as Array<{ token_id: number; peer_id: string }>
+    const judgeCandidates = db.prepare(
+      'SELECT token_id, name, ens_name, peer_id FROM pets WHERE token_id NOT IN (?, ?) AND peer_id IS NOT NULL LIMIT 1'
+    ).all(petAId, petBId) as Array<{ token_id: number; name: string | null; ens_name: string | null; peer_id: string }>
+    const judges = judgeCandidates.filter(j => supervisor.hasWorker(j.token_id)).slice(0, 1)
 
     const battleId = `battle-${randomBytes(8).toString('hex')}`
+    db.prepare(
+      'INSERT OR IGNORE INTO battles (id, pet_a, pet_b, stake, format, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).run(battleId, petAId, petBId, stakeAmount, format, 'active', Date.now())
+    supervisor.recordBattleEvent(
+      battleId,
+      'matched',
+      `${petA.name} matched with ${petB.name} for ${format}. ${stakeAmount} USDC stake selected.`,
+      petAId,
+      {
+        track: 'Gensyn AXL + BattleEscrow + ENS',
+        stakeAmount,
+        format,
+        opponentPetId: petBId,
+        judgePetIds: judges.map(j => j.token_id),
+      },
+    )
+    supervisor.recordBattleEvent(
+      battleId,
+      'judges',
+      judges.length > 0
+        ? `Judge selected: ${judges[0].ens_name ?? judges[0].name ?? `pet-${judges[0].token_id}`}.`
+        : 'No judge pet available; battle will fall back to timeout/tie handling.',
+      undefined,
+      { judgeCount: judges.length },
+    )
+
     supervisor.broadcast(petAId, {
       type:        'battle-start',
       battleId,
+      format,
       myWallet:    petA.wallet_address,
       withPetId:   petBId,
       withPeerId:  petB.peer_id,
@@ -198,7 +455,187 @@ app.post<{ Body: { petAId: number; petBId: number; stakeAmount: string } }>(
       stakeAmount,
       judges:      judges.map(j => ({ petId: j.token_id, peerId: j.peer_id })),
     })
-    return { ok: true, battleId }
+    return { ok: true, battleId, escrowBattleKey: battleIdToEscrowKey(battleId) }
+  },
+)
+
+/// Active battles this pet is part of (initiator or opponent). Lets the
+/// opponent open the arena with the same `battleId` to stake without re-queuing.
+app.get<{ Querystring: { petId: string } }>(
+  '/api/battle/pending-for-pet',
+  (req, reply) => {
+    const raw = req.query.petId
+    const petId = typeof raw === 'string' ? Number(raw) : Number.NaN
+    if (!Number.isFinite(petId) || petId <= 0) {
+      return reply.status(400).send({ error: 'petId required' })
+    }
+    type Row = {
+      id: string
+      pet_a: number
+      pet_b: number
+      stake: string
+      format: string
+      status: string
+      created_at: number
+    }
+    const rows = db
+      .prepare(
+        `SELECT id, pet_a, pet_b, stake, format, status, created_at
+         FROM battles
+         WHERE status = 'active' AND (pet_a = ? OR pet_b = ?)
+         ORDER BY created_at DESC`,
+      )
+      .all(petId, petId) as Row[]
+
+    type NameRow = { name: string | null; ens_name: string | null }
+    const nameFor = (tid: number) =>
+      db.prepare('SELECT name, ens_name FROM pets WHERE token_id = ?').get(tid) as NameRow | undefined
+
+    const battles = rows.map((r) => {
+      const isA = r.pet_a === petId
+      const opponentPetId = isA ? r.pet_b : r.pet_a
+      const opp = nameFor(opponentPetId)
+      const stakeNum = Number.parseFloat(r.stake)
+      const stakeUsdc = Number.isFinite(stakeNum) ? stakeNum : 0
+      return {
+        battleId:        r.id,
+        escrowBattleKey: battleIdToEscrowKey(r.id),
+        /** BattleEscrow on-chain pet1 is always Hub `pet_a` (who queued). */
+        escrowPet1TokenId: r.pet_a,
+        yourPetId:       petId,
+        opponentPetId,
+        opponentName:    opp?.name ?? `pet-${opponentPetId}`,
+        opponentEnsName: opp?.ens_name ?? `${opp?.name ?? `pet-${opponentPetId}`}.tama.eth`,
+        role:            isA ? ('initiator' as const) : ('opponent' as const),
+        stakeUsdc,
+        format:          r.format,
+      }
+    })
+
+    return { battles }
+  },
+)
+
+app.get<{ Querystring: { battleId: string } }>(
+  '/api/battle/status',
+  async (req, reply) => {
+    const { battleId } = req.query
+    if (!battleId) return reply.status(400).send({ error: 'battleId required' })
+    type BattleRow = { id: string; pet_a: number; pet_b: number; stake: string; format: string; status: string; winner: number | null; judges: string | null; payouts: string | null; created_at: number; settled_at: number | null }
+    const row = db.prepare('SELECT * FROM battles WHERE id = ?').get(battleId) as BattleRow | undefined
+    if (!row) return reply.status(404).send({ error: 'Battle not found' })
+    type EventRow = { phase: string; detail: string; pet_id: number | null; metadata: string | null; created_at: number }
+    const eventRows = db.prepare(
+      'SELECT phase, detail, pet_id, metadata, created_at FROM battle_events WHERE battle_id = ? ORDER BY created_at ASC',
+    ).all(battleId) as EventRow[]
+    const pets = db.prepare('SELECT token_id, name, ens_name FROM pets').all() as Array<{ token_id: number; name: string | null; ens_name: string | null }>
+    const petNames = new Map(pets.map(p => [p.token_id, p.ens_name ?? p.name ?? `pet-${p.token_id}`]))
+    const judges = row.judges ? JSON.parse(row.judges) as Array<{ petId: number; score: number; reasoning: string }> : []
+    const opponentOfWinner = row.winner === row.pet_a ? row.pet_b : row.pet_a
+    const judgeVotes = judges.map(j => ({
+      judge: petNames.get(j.petId) ?? `pet-${j.petId}`,
+      votedFor: j.score === 1
+        ? (petNames.get(row.winner ?? 0) ?? `pet-${row.winner}`)
+        : (petNames.get(opponentOfWinner) ?? `pet-${opponentOfWinner}`),
+      reasoning: j.reasoning,
+    }))
+    const events = eventRows.map(e => {
+      let metadata: Record<string, unknown> = {}
+      try { metadata = JSON.parse(e.metadata ?? '{}') as Record<string, unknown> } catch {}
+      return {
+        at: e.created_at - row.created_at,
+        phase: e.phase,
+        detail: e.detail,
+        petId: e.pet_id,
+        petName: e.pet_id ? (petNames.get(e.pet_id) ?? `pet-${e.pet_id}`) : null,
+        metadata,
+        petWon: row.winner != null ? row.winner === row.pet_a : undefined,
+      }
+    })
+    const current = events[events.length - 1] ?? {
+      at: 0,
+      phase: 'matched',
+      detail: 'Battle matched. Waiting for first AXL event.',
+      petId: null,
+      petName: null,
+      metadata: {},
+      petWon: undefined,
+    }
+    const payouts = row.payouts ? JSON.parse(row.payouts) : []
+    const revEvents = [...events].reverse()
+    const metaHit = revEvents.find(
+      e => typeof e.metadata.settlementTxHash === 'string' || typeof e.metadata.txHash === 'string',
+    )
+    const payoutTxHash =
+      typeof metaHit?.metadata.settlementTxHash === 'string'
+        ? metaHit.metadata.settlementTxHash
+        : typeof metaHit?.metadata.txHash === 'string'
+          ? metaHit.metadata.txHash
+          : null
+
+    const verdictRow = [...eventRows].reverse().find(e => e.phase === 'verdict' || e.phase === 'error')
+    let verdictMeta: Record<string, unknown> = {}
+    try {
+      verdictMeta = JSON.parse(verdictRow?.metadata ?? '{}') as Record<string, unknown>
+    } catch {}
+    const settlementError =
+      typeof verdictMeta.settlementError === 'string' ? verdictMeta.settlementError : null
+    const workerOnChainStatus =
+      typeof verdictMeta.onChainStatus === 'string' ? verdictMeta.onChainStatus : null
+
+    let escrowOnChain: { pet1Staked: boolean; pet2Staked: boolean; settled: boolean } | null = null
+    const sepoliaRpc = process.env.SEPOLIA_RPC_URL
+    if (sepoliaRpc) {
+      try {
+        const { createPublicClient, http } = await import('viem')
+        const { sepolia } = await import('viem/chains')
+        const { battleIdToEscrowKey, ADDRESSES_SEPOLIA, BattleEscrowABI, parseBattleEscrowBattlesRead } = await import('contracts-sdk')
+        const client = createPublicClient({ chain: sepolia, transport: http(sepoliaRpc) })
+        const key = battleIdToEscrowKey(battleId)
+        const raw = await client.readContract({
+          address:      ADDRESSES_SEPOLIA.BattleEscrow,
+          abi:          BattleEscrowABI,
+          functionName: 'battles',
+          args:         [key],
+        })
+        const br = parseBattleEscrowBattlesRead(raw)
+        if (br && br.pet1 !== '0x0000000000000000000000000000000000000000') {
+          escrowOnChain = {
+            pet1Staked: br.pet1Staked,
+            pet2Staked: br.pet2Staked,
+            settled:    br.settled,
+          }
+        }
+      } catch {
+        /* RPC flake — omit escrowOnChain */
+      }
+    }
+
+    return {
+      battleId:  row.id,
+      petA:      row.pet_a,
+      petB:      row.pet_b,
+      stake:     row.stake,
+      format:    row.format,
+      status:    row.status,
+      winner:    row.winner ?? null,
+      judges,
+      judgeVotes,
+      payouts,
+      createdAt: row.created_at,
+      settledAt: row.settled_at ?? null,
+      elapsedMs: (row.settled_at ?? Date.now()) - row.created_at,
+      events,
+      current,
+      finished: row.status !== 'active',
+      escrowSettledOnChain: row.status === 'settled',
+      escrowOnChain,
+      payoutTxHash,
+      settlementTxHash: payoutTxHash,
+      settlementError,
+      workerOnChainStatus,
+      source: 'hub',
+    }
   },
 )
 
@@ -423,6 +860,7 @@ async function main() {
   const io = new SocketIOServer(app.server, {
     cors: { origin: '*' },
   })
+  worldIO = io
   supervisor.setIO(io)
 
   // Global human-owner text chat (separate channel from pet AXL chat).
@@ -504,8 +942,8 @@ async function main() {
     for (const { token_id } of livePets) {
       if (positions.has(token_id)) continue
       positions.set(token_id, {
-        x: 60 + Math.random() * 360,    // 60..420 — inside park, away from edges
-        y: 60 + Math.random() * 360,
+        x: 520 + Math.random() * 360,   // 520..880 — inside park rect (500-900)
+        y: 480 + Math.random() * 270,   // 480..750 — inside park rect (460-768)
         zone: 'park',
       })
       seeded++
@@ -544,8 +982,8 @@ async function main() {
       if (convoUntil > now) continue
       if (convoUntil > 0) inConversation.delete(petId)
 
-      const nx = clamp(pos.x + (Math.random() - 0.5) * 40, 40, 440)
-      const ny = clamp(pos.y + (Math.random() - 0.5) * 40, 40, 440)
+      const nx = clamp(pos.x + (Math.random() - 0.5) * 40, 520, 880)
+      const ny = clamp(pos.y + (Math.random() - 0.5) * 40, 480, 750)
       positions.set(petId, { x: nx, y: ny, zone: pos.zone })
     }
   }
@@ -581,6 +1019,10 @@ async function main() {
   // Pets currently engaged in a Hub-brokered conversation. Both directions of
   // the pair share the same entry; cleared when bubble lands or proximity breaks.
   const activeChats = new Map<number, number>()  // petId -> partnerPetId
+  const chatTurnCount = new Map<string, number>() // pairKey -> turns sent
+  const MAX_TURNS = 4
+
+  function pairKey(a: number, b: number) { return `${Math.min(a,b)}-${Math.max(a,b)}` }
 
   function distanceBetween(a: number, b: number): number | null {
     const pa = positions.get(a)
@@ -592,13 +1034,15 @@ async function main() {
   function endChat(a: number, b: number) {
     if (activeChats.get(a) === b) activeChats.delete(a)
     if (activeChats.get(b) === a) activeChats.delete(b)
+    chatTurnCount.delete(pairKey(a, b))
     // Tell both workers to abort any in-flight reply they were about to send
     supervisor.broadcast(a, { type: 'chat-end', withPetId: b })
     supervisor.broadcast(b, { type: 'chat-end', withPetId: a })
   }
 
   // Gate every chat-out IPC: if the speaker is no longer paired with the
-  // listener, or they've drifted past PROXIMITY_BREAK_PX, drop the bubble.
+  // listener, they've drifted past PROXIMITY_BREAK_PX, or the pair has hit
+  // MAX_TURNS, drop the bubble.
   supervisor.setChatGate((fromId, toId) => {
     const partner = activeChats.get(fromId)
     if (partner !== toId) return false
@@ -608,6 +1052,14 @@ async function main() {
       endChat(fromId, toId)
       console.log(`[Broker] Chat ended pet ${fromId}<->${toId} drift=${d.toFixed(0)}px`)
       return false
+    }
+    const key = pairKey(fromId, toId)
+    const turns = (chatTurnCount.get(key) ?? 0) + 1
+    chatTurnCount.set(key, turns)
+    if (turns >= MAX_TURNS) {
+      endChat(fromId, toId)
+      console.log(`[Broker] Chat capped pet ${fromId}<->${toId} after ${turns} turns`)
+      return true  // allow this last message through, end fires after
     }
     return true
   })
@@ -678,11 +1130,12 @@ async function main() {
   bootstrapAdoptionChain().catch(err => console.error('[Hub] adoption-chain bootstrap failed:', err.message))
   bootstrapSubscriptionRegistry().catch(err => console.error('[Hub] sub-registry bootstrap failed:', err.message))
 
-  // A3: ENS heartbeat — bumps lastSeenBlock for every alive pet every 10 min.
+  // A3: ENS heartbeat — bumps lastSeenBlock for every alive pet regularly.
   // This makes the KeeperHub mailbox HERO conditional fire organically:
   // a queued gift transfers automatically once recipient's tama.lastSeenBlock
-  // is within 5 blocks of head. No more Trigger-Now button required.
+  // is fresh. No more Trigger-Now button required.
   supervisor.startEnsHeartbeat()
+  startMailboxAutoDelivery()
 
   // Wait briefly for re-spawned workers to register peer_ids, then seed positions.
   // After that, nudge them every 5s so the park has constant background motion.

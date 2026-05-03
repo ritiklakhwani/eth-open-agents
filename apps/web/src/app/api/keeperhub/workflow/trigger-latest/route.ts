@@ -28,6 +28,8 @@ interface KeeperHubWorkflow {
   createdAt?: string
 }
 
+const HUB_URL = process.env.NEXT_PUBLIC_HUB_URL ?? 'http://localhost:3001'
+
 const NAME_FILTER: Record<TriggerLatestPayload['kind'], (petId: number, name: string) => boolean> = {
   mailbox:      (petId, name) => name.startsWith(`mailbox-${petId}-to-`),
   // subscription cancellation workflows aren't pet-scoped in the name; just
@@ -60,6 +62,21 @@ async function callKeeperHub<T = unknown>(toolName: string, args: Record<string,
     }
   } finally {
     await client.close()
+  }
+}
+
+async function markMailboxDelivered(workflowId: string, executionId: string | null): Promise<boolean> {
+  try {
+    const res = await fetch(`${HUB_URL}/api/keeperhub/mailbox/delivered`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workflowId, executionId }),
+      signal: AbortSignal.timeout(2000),
+      cache: 'no-store',
+    })
+    return res.ok
+  } catch {
+    return false
   }
 }
 
@@ -96,13 +113,18 @@ export async function POST(req: Request) {
       'execute_workflow',
       { id: target.id },
     )
+    const executionId = exec.executionId ?? null
+    const mailboxMarkedDelivered = body.kind === 'mailbox'
+      ? await markMailboxDelivered(target.id, executionId)
+      : undefined
 
     return Response.json({
       workflowId: target.id,
       workflowName: target.name,
-      executionId: exec.executionId ?? null,
+      executionId,
       status: exec.status ?? 'fired',
       output: exec.output ?? null,
+      mailboxMarkedDelivered,
       source: 'hub',
     })
   } catch (err) {

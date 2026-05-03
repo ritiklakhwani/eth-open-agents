@@ -52,11 +52,19 @@ export function PixelDialog({
         onClick={onClose}
       />
 
-      {/* Card */}
-      <div className={`relative w-full ${sizeMap[size]}`}>
+      {/* Card — max height + scroll so long live feeds don’t push buttons off-screen */}
+      <div
+        className={[
+          'relative flex w-full min-h-0 flex-col',
+          sizeMap[size],
+          'max-h-[min(92dvh,52rem)]',
+        ].join(' ')}
+      >
         <PixelCard
           variant="pink"
           title={title}
+          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          bodyClassName="min-h-0 flex-1 overflow-y-auto overscroll-y-contain p-4"
           headerRight={
             !hideCloseButton && (
               <button

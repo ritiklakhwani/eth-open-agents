@@ -10,7 +10,7 @@ PetCity registers and fires every KeeperHub primitive type. Each has its own act
 |---|---|---|---|
 | 1 | **Recurring** | `createRecurringAllowance` | Weekly USDC from owner → pet. Created at every pet spawn |
 | 2 | **Scheduled** | `createScheduledGift` | One-shot future gifts at a specified ISO timestamp |
-| 3 | **Conditional (HERO)** | `createConditionalMailbox` | Cross-time mailbox: poll target ENS lastSeenBlock, transfer when recipient online |
+| 3 | **Conditional (HERO)** | `createConditionalMailbox` | Cross-time mailbox: Hub detects recipient online, then executes KeeperHub transfer |
 | 4 | **Event listener** | `createAdoptionTransferChain` | On TamaPet `Transfer` event: chain ENS owner update + USDC sweep + Hub webhook notify |
 | 5 | **Conditional escrow release** | `createBattleEscrowReleaseListener` | On `BattleEscrow.Verdict` event: write achievement to winner ENS |
 
@@ -22,18 +22,51 @@ Plus:
 
 **The pitch**: a pet sends a gift to an offline friend's pet. KeeperHub queues. When the friend reconnects (their pet's ENS `tama.lastSeenBlock` updates), KeeperHub fires automatically. USDC moves.
 
-The workflow is composed of 4 nodes:
+In hosted/public mode, the workflow is composed of 5 nodes:
 
 ```
-[Schedule trigger every 1 min]
+[Manual trigger executed automatically by Hub]
   → [Read <recipient>.tama.eth lastSeenBlock from ENS PublicResolver]
-    → [Condition: |currentBlock - lastSeenBlock| < 5 blocks]
+    → [Condition: |currentBlock - lastSeenBlock| < freshness window]
       → [TRUE branch: web3/transfer-token from sender's wallet]
+        → [Webhook: POST <HUB_BASE_URL>/api/keeperhub/mailbox/delivered]
 ```
 
 Code: [packages/keeperhub/index.ts:184](packages/keeperhub/index.ts#L184)
 
 This is the demo punchline: *"The agent waited days for the human to come back. The human did nothing."* — that's the autonomous-agent narrative the KeeperHub track wants.
+
+### Hosted/public webhook setup
+
+KeeperHub can only call back to the Hub if `HUB_BASE_URL` is reachable from the public internet. `localhost` does not work for KeeperHub cloud callbacks.
+
+For a local hosted-style demo:
+
+1. Start the Hub on port 3001:
+   ```bash
+   pnpm dev:hub
+   ```
+2. Expose it with a tunnel:
+   ```bash
+   ngrok http 3001
+   ```
+   or:
+   ```bash
+   cloudflared tunnel --url http://localhost:3001
+   ```
+3. Put the HTTPS tunnel URL in `.env`:
+   ```bash
+   HUB_BASE_URL=https://your-public-tunnel-url
+   ```
+4. Restart the Hub and pet workers.
+5. Verify the public callback URL:
+   ```bash
+   curl https://your-public-tunnel-url/api/keeperhub/webhook/health
+   ```
+   Expected response includes `"ok":true` and `"mode":"hub-auto-with-webhook"`.
+6. Create a new mailbox gift. Existing mailbox workflows must be recreated because workflow nodes are captured when KeeperHub creates the workflow.
+
+When `HUB_BASE_URL` is blank or points at localhost, PetCity still uses the same Hub auto-delivery bridge, but without the public webhook acknowledgement.
 
 ## Subscription Pet — practical-utility hero
 
@@ -96,13 +129,13 @@ Live during demo (verified in KeeperHub dashboard right now):
 - `mailbox-18-to-19` — registered, status: active
 - 5 × `cancel-sub-N` workflows — registered across multiple test runs
 
-## Demo execute fallback
+## Delivery fallback
 
-The mailbox workflow's condition (recipient ENS lastSeenBlock) won't fire organically without Phase 3 ENS plumbing. The demo includes a manual `▷ TRIGGER NOW (DEMO)` button that calls KeeperHub's `execute_workflow` MCP tool to bypass the condition and run the action immediately. Judges see USDC actually move on Sepolia.
+The old manual `▷ TRIGGER NOW (DEMO)` button has been removed from the UI. Normal mailbox delivery now uses the Hub auto-delivery bridge, with an optional public KeeperHub webhook acknowledgement when `HUB_BASE_URL` is configured.
 
 Code: [apps/web/src/app/api/keeperhub/workflow/trigger-latest/route.ts](apps/web/src/app/api/keeperhub/workflow/trigger-latest/route.ts)
 
-The pitch becomes: *"Normally KeeperHub waits until they come online. For the demo we'll fire it manually so you see the USDC move — but the wait-and-fire behavior is what enables this in production."*
+The pitch is: *"The Hub sees the recipient pet come online, executes the KeeperHub workflow, KeeperHub moves the USDC, then the Hub marks both mailboxes delivered."*
 
 ## Files reviewers should look at
 
